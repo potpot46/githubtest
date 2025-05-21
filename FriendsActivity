@@ -1,0 +1,450 @@
+package com.example.notetify.activities; // Ensure this matches your package structure
+
+import android.content.DialogInterface; // Added for AlertDialog
+import android.content.Intent;
+import android.os.Bundle;
+import android.util.Log;
+import android.view.MenuItem;
+import android.view.View;
+import android.widget.Button;
+import android.widget.ProgressBar;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable; // Added for CompletionListener
+import androidx.appcompat.app.AlertDialog; // Added for confirmation dialog
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.appcompat.widget.Toolbar;
+import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.RecyclerView;
+
+import com.google.firebase.auth.FirebaseAuth;
+import com.google.firebase.auth.FirebaseUser;
+import com.google.firebase.database.DataSnapshot;
+import com.google.firebase.database.DatabaseError;
+import com.google.firebase.database.DatabaseReference;
+import com.google.firebase.database.FirebaseDatabase;
+import com.google.firebase.database.ServerValue; // For ServerValue.TIMESTAMP
+import com.google.firebase.database.ValueEventListener;
+import com.example.notetify.R; // Ensure this matches your R file package
+import com.example.notetify.adapters.FriendsAdapter; // Ensure this import is correct
+import com.example.notetify.models.User; // Ensure this import is correct
+// import com.example.notetify.models.Note; // Not strictly needed if using Maps for updates
+
+import java.util.ArrayList;
+// import java.util.Collections; // Not used in this version
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class FriendsActivity extends AppCompatActivity implements FriendsAdapter.OnFriendInteractionListener {
+
+    private static final String TAG = "FriendsActivity";
+
+    private RecyclerView recyclerViewFriends;
+    private FriendsAdapter friendsAdapter;
+    private List<User> friendsDisplayList;
+    private ProgressBar progressBarFriends;
+    private Button buttonGoToAddFriend, buttonViewFriendRequests;
+    private TextView textViewNoFriends;
+
+    private FirebaseDatabase database;
+    private FirebaseAuth mAuth;
+    private DatabaseReference currentUserFriendsRef;
+    private ValueEventListener friendsListener;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_friends);
+
+        Toolbar toolbar = findViewById(R.id.toolbarFriends);
+        setSupportActionBar(toolbar);
+        if (getSupportActionBar() != null) {
+            getSupportActionBar().setDisplayHomeAsUpEnabled(true);
+            getSupportActionBar().setTitle("My Friends");
+        }
+
+        database = FirebaseDatabase.getInstance();
+        mAuth = FirebaseAuth.getInstance();
+
+        recyclerViewFriends = findViewById(R.id.recyclerViewFriends);
+        progressBarFriends = findViewById(R.id.progressBarFriends);
+        buttonGoToAddFriend = findViewById(R.id.buttonGoToAddFriend);
+        buttonViewFriendRequests = findViewById(R.id.buttonViewFriendRequests);
+        textViewNoFriends = findViewById(R.id.textViewNoFriends);
+
+        recyclerViewFriends.setLayoutManager(new LinearLayoutManager(this));
+        friendsDisplayList = new ArrayList<>();
+        friendsAdapter = new FriendsAdapter(friendsDisplayList, this);
+        recyclerViewFriends.setAdapter(friendsAdapter);
+
+        buttonGoToAddFriend.setOnClickListener(v -> {
+            Intent intent = new Intent(FriendsActivity.this, AddFriendActivity.class);
+            startActivity(intent);
+        });
+
+        buttonViewFriendRequests.setOnClickListener(v -> {
+            Intent intent = new Intent(FriendsActivity.this, FriendRequestsActivity.class);
+            startActivity(intent);
+        });
+
+        FirebaseUser currentUser = mAuth.getCurrentUser();
+        if (currentUser != null) {
+            currentUserFriendsRef = database.getReference("users")
+                    .child(currentUser.getUid()).child("friends");
+        } else {
+            Toast.makeText(this, "User not logged in.", Toast.LENGTH_SHORT).show();
+            finish();
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        FirebaseUser currentUser = mAuth.getCurrentUser();
+        if (currentUser != null) {
+            if (currentUserFriendsRef == null) {
+                currentUserFriendsRef = database.getReference("users")
+                        .child(currentUser.getUid()).child("friends");
+            }
+            attachFriendsListener();
+        } else if (!isFinishing()) {
+            Toast.makeText(this, "User not logged in.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        detachFriendsListener();
+    }
+
+    private void attachFriendsListener() {
+        if (currentUserFriendsRef == null) return;
+
+        progressBarFriends.setVisibility(View.VISIBLE);
+        textViewNoFriends.setVisibility(View.GONE);
+
+        if (friendsListener == null) {
+            friendsListener = new ValueEventListener() {
+                @Override
+                public void onDataChange(@NonNull DataSnapshot dataSnapshot) {
+                    if (!dataSnapshot.exists() || dataSnapshot.getChildrenCount() == 0) {
+                        progressBarFriends.setVisibility(View.GONE);
+                        friendsDisplayList.clear();
+                        friendsAdapter.updateData(new ArrayList<>(friendsDisplayList)); // Pass new list
+                        textViewNoFriends.setText("You have no friends yet. Add some!");
+                        textViewNoFriends.setVisibility(View.VISIBLE);
+                        Log.d(TAG, "No friends found in Firebase or dataSnapshot empty.");
+                        return;
+                    }
+
+                    List<String> friendUids = new ArrayList<>();
+                    for (DataSnapshot friendSnapshot : dataSnapshot.getChildren()) {
+                        if (Boolean.TRUE.equals(friendSnapshot.getValue(Boolean.class)) && friendSnapshot.getKey() != null) {
+                            friendUids.add(friendSnapshot.getKey());
+                        }
+                    }
+
+                    Log.d(TAG, "Friend UIDs fetched: " + friendUids.size());
+                    if (friendUids.isEmpty()) {
+                        progressBarFriends.setVisibility(View.GONE);
+                        friendsDisplayList.clear();
+                        friendsAdapter.updateData(new ArrayList<>(friendsDisplayList)); // Pass new list
+                        textViewNoFriends.setText("Your friend list is empty.");
+                        textViewNoFriends.setVisibility(View.VISIBLE);
+                        return;
+                    }
+                    fetchFriendDetails(new ArrayList<>(friendUids));
+                }
+
+                @Override
+                public void onCancelled(@NonNull DatabaseError databaseError) {
+                    Log.e(TAG, "loadFriends:onCancelled", databaseError.toException());
+                    progressBarFriends.setVisibility(View.GONE);
+                    textViewNoFriends.setText("Failed to load friends list.");
+                    textViewNoFriends.setVisibility(View.VISIBLE);
+                }
+            };
+            currentUserFriendsRef.addValueEventListener(friendsListener);
+        } else {
+            if (friendsDisplayList.isEmpty() && progressBarFriends.getVisibility() == View.GONE) {
+                progressBarFriends.setVisibility(View.VISIBLE);
+                textViewNoFriends.setVisibility(View.GONE);
+            }
+        }
+    }
+
+    private void detachFriendsListener() {
+        if (currentUserFriendsRef != null && friendsListener != null) {
+            currentUserFriendsRef.removeEventListener(friendsListener);
+            friendsListener = null;
+        }
+    }
+
+
+    private void fetchFriendDetails(List<String> friendUidsFromListener) {
+        final List<String> friendUids = new ArrayList<>(friendUidsFromListener);
+        Log.i(TAG, "Starting fetchFriendDetails for " + friendUids.size() + " UIDs: " + friendUids);
+
+        // final List<User> successfullyFetchedFriendsBatch = new ArrayList<>(); // Not directly used like this anymore
+        DatabaseReference usersRef = database.getReference("users");
+        AtomicInteger fetchesRemaining = new AtomicInteger(friendUids.size());
+
+        if (friendUids.isEmpty()) {
+            Log.d(TAG, "fetchFriendDetails called with empty UID list.");
+            updateAdapterAndUI(new ArrayList<>(), 0); // Pass empty list
+            return;
+        }
+
+        progressBarFriends.setVisibility(View.VISIBLE);
+        textViewNoFriends.setVisibility(View.GONE);
+        List<User> currentBatchFetchedFriends = new ArrayList<>();
+
+        for (String friendUid : friendUids) {
+            if (friendUid == null) {
+                Log.w(TAG, "Null friendUid encountered in list.");
+                if (fetchesRemaining.decrementAndGet() == 0) {
+                    updateAdapterAndUI(currentBatchFetchedFriends, friendUids.size());
+                }
+                continue;
+            }
+            Log.d(TAG, "Attempting to fetch details for UID: " + friendUid);
+            usersRef.child(friendUid).addListenerForSingleValueEvent(new ValueEventListener() {
+                @Override
+                public void onDataChange(@NonNull DataSnapshot userDetailSnapshot) {
+                    Log.d(TAG, "onDataChange for user detail UID: " + friendUid + ", Exists: " + userDetailSnapshot.exists());
+                    if (userDetailSnapshot.exists()) {
+                        User friend = userDetailSnapshot.getValue(User.class);
+                        if (friend != null && friend.getUid() != null) {
+                            Log.i(TAG, "SUCCESS: Fetched details for: " + friend.getUid() + " - " + (friend.getDisplayName() != null ? friend.getDisplayName() : friend.getEmail()));
+                            currentBatchFetchedFriends.add(friend);
+                        } else {
+                            Log.w(TAG, "WARNING: Fetched User object is null or its UID is null for friend UID: " + friendUid + ". Snapshot data: " + userDetailSnapshot.getValue());
+                        }
+                    } else {
+                        Log.w(TAG, "WARNING: No user data found in /users node for friend UID: " + friendUid);
+                    }
+
+                    if (fetchesRemaining.decrementAndGet() == 0) {
+                        Log.i(TAG, "All user detail fetches complete. Total successfully fetched this batch: " + currentBatchFetchedFriends.size());
+                        updateAdapterAndUI(currentBatchFetchedFriends, friendUids.size());
+                    }
+                }
+
+                @Override
+                public void onCancelled(@NonNull DatabaseError databaseError) {
+                    Log.e(TAG, "loadFriendDetails:onCancelled for UID: " + friendUid, databaseError.toException());
+                    if (fetchesRemaining.decrementAndGet() == 0) {
+                        updateAdapterAndUI(currentBatchFetchedFriends, friendUids.size());
+                    }
+                }
+            });
+        }
+    }
+
+    private void updateAdapterAndUI(List<User> newlyFetchedFriendsForThisBatch, int totalExpectedUidsBasedOnFriendList) {
+        progressBarFriends.setVisibility(View.GONE);
+        this.friendsDisplayList.clear();
+        this.friendsDisplayList.addAll(newlyFetchedFriendsForThisBatch);
+        friendsAdapter.updateData(new ArrayList<>(this.friendsDisplayList)); // Important to pass a new list for DiffUtil
+
+        Log.i(TAG, "updateAdapterAndUI: Displaying " + this.friendsDisplayList.size() + " friends. Originally expected " + totalExpectedUidsBasedOnFriendList + " UIDs from friends list.");
+
+        if (this.friendsDisplayList.isEmpty()) {
+            textViewNoFriends.setText(totalExpectedUidsBasedOnFriendList > 0 ? "Could not load friend details." : "You have no friends yet. Add some!");
+            textViewNoFriends.setVisibility(View.VISIBLE);
+        } else {
+            textViewNoFriends.setVisibility(View.GONE);
+        }
+    }
+
+
+    // ------------- MODIFICATION START: onStartNoteClick (Forced Overwrite Logic) -------------
+// In FriendsActivity.java
+
+    @Override
+    public void onStartNoteClick(User friend) {
+        FirebaseUser currentUser = mAuth.getCurrentUser();
+        if (currentUser == null || friend == null || friend.uid == null) { // Added null check for friend
+            Toast.makeText(this, "Error: User information missing.", Toast.LENGTH_SHORT).show();
+            Log.e(TAG, "onStartNoteClick: currentUser or friend or friend.uid is null.");
+            return;
+        }
+        final String currentUserUid = currentUser.getUid();
+        final String friendUid = friend.uid;
+
+        // Ensure UIDs are not the same (shouldn't happen if friend list is correct)
+        if (currentUserUid.equals(friendUid)) {
+            Toast.makeText(this, "Cannot start a note with yourself from the friends list.", Toast.LENGTH_SHORT).show();
+            Log.w(TAG, "onStartNoteClick: Attempted to start note with self.");
+            return;
+        }
+
+        final String noteId = (currentUserUid.compareTo(friendUid) < 0) ?
+                currentUserUid + "-" + friendUid :
+                friendUid + "-" + currentUserUid;
+
+        Log.d(TAG, "Generated noteId: " + noteId + " for users " + currentUserUid + " and " + friendUid);
+
+        final DatabaseReference noteNodeRef = database.getReference("notes").child(noteId);
+        final DatabaseReference rootRef = database.getReference(); // For multi-path update
+
+        // Check if the note already exists to avoid overwriting content if just participants need adding.
+        noteNodeRef.addListenerForSingleValueEvent(new ValueEventListener() {
+            @Override
+            public void onDataChange(@NonNull DataSnapshot noteSnapshot) {
+                Map<String, Object> updates = new HashMap<>();
+                boolean existingNote = noteSnapshot.exists();
+
+                Log.d(TAG, "Note " + noteId + (existingNote ? " exists." : " does not exist."));
+
+                // Path for current user's note index
+                String userNotePath1 = "/user_notes/" + currentUserUid + "/" + noteId;
+                updates.put(userNotePath1, true);
+
+                // Path for friend's note index
+                String userNotePath2 = "/user_notes/" + friendUid + "/" + noteId;
+                updates.put(userNotePath2, true); // Always try to ensure friend also has the index
+
+                // Ensure participants are set in the main note object
+                String participantsPath1 = "/notes/" + noteId + "/participants/" + currentUserUid;
+                if (!existingNote || !Boolean.TRUE.equals(noteSnapshot.child("participants").child(currentUserUid).getValue(Boolean.class))) {
+                    Log.i(TAG, (existingNote ? "UPDATING" : "CREATING") + " user " + currentUserUid + " as participant for note " + noteId);
+                    updates.put(participantsPath1, true);
+                }
+
+                String participantsPath2 = "/notes/" + noteId + "/participants/" + friendUid;
+                if (!existingNote || !Boolean.TRUE.equals(noteSnapshot.child("participants").child(friendUid).getValue(Boolean.class))) {
+                    Log.i(TAG, (existingNote ? "UPDATING" : "CREATING") + " friend " + friendUid + " as participant for note " + noteId);
+                    updates.put(participantsPath2, true);
+                }
+
+                // If the note doesn't exist at all, create its basic structure
+                if (!existingNote) {
+                    Log.i(TAG, "Note " + noteId + " does not exist. CREATING FULL NOTE OBJECT.");
+                    updates.put("/notes/" + noteId + "/content", "");
+                    updates.put("/notes/" + noteId + "/lastEditedByUid", currentUserUid);
+                    updates.put("/notes/" + noteId + "/timestamp", System.currentTimeMillis()); // Use client time for creation
+                    // Note: For timestamp on edit, NoteActivity will use System.currentTimeMillis().
+                    // If you want server time for creation consistently, you'd use ServerValue.TIMESTAMP
+                    // updates.put("/notes/" + noteId + "/timestamp", ServerValue.TIMESTAMP);
+                    // And your Note model's timestamp field should be Long (which it is).
+                }
+
+                if (!updates.isEmpty()) {
+                    Log.d(TAG, "Performing Firebase update. FULL UPDATES MAP: " + updates.toString());
+                    rootRef.updateChildren(updates, new DatabaseReference.CompletionListener() {
+                        @Override
+                        public void onComplete(@Nullable DatabaseError databaseError, @NonNull DatabaseReference databaseReference) {
+                            if (databaseError == null) {
+                                Log.i(TAG, "Successfully updated note/user_notes for " + noteId);
+                                launchNoteActivity(noteId);
+                            } else {
+                                Log.e(TAG, "Failed to update note/user_notes for " + noteId, databaseError.toException());
+                                Toast.makeText(FriendsActivity.this, "Error preparing note: " + databaseError.getMessage(), Toast.LENGTH_LONG).show();
+                            }
+                        }
+                    });
+                } else {
+                    Log.d(TAG, "No updates needed for Firebase for note " + noteId + ". Launching NoteActivity.");
+                    launchNoteActivity(noteId); // Note and indexes already exist and are correct
+                }
+            }
+
+            @Override
+            public void onCancelled(@NonNull DatabaseError databaseError) {
+                Log.e(TAG, "Failed to check note existence for " + noteId, databaseError.toException());
+                Toast.makeText(FriendsActivity.this, "Error accessing note data.", Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+    // ------------- MODIFICATION END: onStartNoteClick -------------
+
+
+    private void launchNoteActivity(String noteId) {
+        Intent intent = new Intent(FriendsActivity.this, NoteActivity.class);
+        intent.putExtra(NoteActivity.EXTRA_NOTE_ID, noteId);
+        startActivity(intent);
+    }
+
+    @Override
+    public void onUnfriendClick(User friendToUnfriend) {
+        if (friendToUnfriend == null || friendToUnfriend.getUid() == null) {
+            Toast.makeText(this, "Cannot unfriend this user.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        FirebaseUser currentUser = mAuth.getCurrentUser();
+        if (currentUser == null) {
+            Toast.makeText(this, "You are not logged in.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        String currentUserId = currentUser.getUid();
+        String friendId = friendToUnfriend.getUid();
+        String friendName = friendToUnfriend.getDisplayName() != null && !friendToUnfriend.getDisplayName().isEmpty() ?
+                friendToUnfriend.getDisplayName() : friendToUnfriend.getEmail();
+
+        new AlertDialog.Builder(this)
+                .setTitle("Unfriend User")
+                .setMessage("Are you sure you want to unfriend " + friendName + "?")
+                .setPositiveButton("Unfriend", (dialog, which) -> {
+                    performUnfriend(currentUserId, friendId, friendName);
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    // ------------- MODIFICATION START: performUnfriend (One-sided removal) -------------
+    private void performUnfriend(String currentUserId, String friendId, String friendNameForToast) {
+        progressBarFriends.setVisibility(View.VISIBLE);
+
+        DatabaseReference currentUserFriendEntryRef = database.getReference("users")
+                .child(currentUserId).child("friends").child(friendId);
+
+        Map<String, Object> unfriendUpdates = new HashMap<>();
+        // Only remove friend from current user's list on the client-side
+        unfriendUpdates.put("/users/" + currentUserId + "/friends/" + friendId, null);
+
+        // The line below is commented out because the client does not have permission
+        // to write to the other user's friend list directly.
+        // This reciprocal action should be handled by a Cloud Function or other server-side logic for full bidirectionality.
+        // unfriendUpdates.put("/users/" + friendId + "/friends/" + currentUserId, null);
+
+        Log.d(TAG, "Attempting to unfriend (one-sided from client): Removing " + friendId + " from " + currentUserId + "'s friend list. Updates: " + unfriendUpdates.toString());
+
+        database.getReference().updateChildren(unfriendUpdates, (@Nullable DatabaseError databaseError, @NonNull DatabaseReference databaseReference) -> {
+            progressBarFriends.setVisibility(View.GONE);
+            if (databaseError == null) {
+                Toast.makeText(FriendsActivity.this, "You are no longer friends with " + friendNameForToast + ". They will also need to remove you for the change to be mutual.", Toast.LENGTH_LONG).show();
+                Log.d(TAG, "Successfully removed " + friendId + " from " + currentUserId + "'s friend list.");
+                // The ValueEventListener on /users/{currentUserId}/friends should automatically refresh the list.
+            } else {
+                // This should ideally not happen if the rule for users/$uid/.write is auth.uid == $uid
+                Toast.makeText(FriendsActivity.this, "Failed to unfriend. " + databaseError.getMessage(), Toast.LENGTH_LONG).show();
+                Log.e(TAG, "Failed to remove " + friendId + " from " + currentUserId + "'s friend list.", databaseError.toException());
+            }
+        });
+    }
+    // ------------- MODIFICATION END: performUnfriend -------------
+
+
+    @Override
+    public boolean onOptionsItemSelected(MenuItem item) {
+        if (item.getItemId() == android.R.id.home) {
+            onBackPressed();
+            return true;
+        }
+        return super.onOptionsItemSelected(item);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        detachFriendsListener();
+    }
+}
