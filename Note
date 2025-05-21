@@ -1,0 +1,187 @@
+package com.example.notetify.models;
+
+import com.google.firebase.database.Exclude; // Keep this import
+import com.google.firebase.database.IgnoreExtraProperties; // Good practice to add
+
+import java.util.HashMap;
+import java.util.Map;
+
+
+@IgnoreExtraProperties // Add this to prevent crashes if Firebase has extra fields not in your model
+public class Note {
+
+    @Exclude // This field will not be saved to Firebase as it's the key of the node
+    public String noteId; // To store the Firebase key (ID) of this note
+
+    public String title;
+    public String content;
+    public String ownerName;
+    public String lastEditedByUid;
+    public long timestamp;
+    public Map<String, Boolean> participants; // Existing field for multiple participants
+
+    // --- ADDED for "Note shared with:" feature in widget ---
+    public String ownerUid; // To identify the original owner
+    public String sharedWithUserId; // UID of the primary user this note is shared with (for widget display)
+    public String sharedWithName;   // Display name of the sharedWithUserId
+    // --- END ADDED fields ---
+
+    // Default constructor required for Firebase
+    public Note() {
+        this.title = "Untitled Note";
+        this.content = "";
+        this.timestamp = System.currentTimeMillis();
+        this.participants = new HashMap<>();
+        this.ownerName = null;
+        // Initialize new fields
+        this.ownerUid = null; // Or an empty string, depending on your logic
+        this.sharedWithUserId = null;
+        this.sharedWithName = null;
+    }
+
+    // Constructor for creating notes programmatically (can be expanded or modified)
+    // Updated comprehensive constructor
+    public Note(String noteId, String title, String content, String ownerUid, String lastEditedByUid, long timestamp, Map<String, Boolean> participants, String sharedWithUserId, String sharedWithName) {
+        this.noteId = noteId;
+        this.title = (title != null && !title.trim().isEmpty()) ? title.trim() : "Untitled Note";
+        this.content = content;
+        this.ownerUid = ownerUid; // Added ownerUid
+        this.ownerName = ownerName;
+        this.lastEditedByUid = lastEditedByUid;
+        this.timestamp = timestamp;
+        this.participants = (participants != null) ? new HashMap<>(participants) : new HashMap<>();
+        this.sharedWithUserId = sharedWithUserId; // Added
+        this.sharedWithName = sharedWithName;   // Added
+    }
+
+
+    // Overloaded constructor that includes title (existing)
+    // Let's ensure it initializes new fields as well
+    public Note(String title, String content, String lastEditedByUid, long timestamp, Map<String, Boolean> participants) {
+        this.title = (title != null && !title.trim().isEmpty()) ? title.trim() : "Untitled Note";
+        this.content = content;
+        this.lastEditedByUid = lastEditedByUid; // Assuming lastEditedByUid might initially be the owner
+        this.ownerUid = lastEditedByUid; // Initialize ownerUid here, can be updated later
+        this.timestamp = timestamp;
+        this.participants = (participants != null) ? new HashMap<>(participants) : new HashMap<>();
+        // Initialize shared fields to null or empty
+        this.sharedWithUserId = null;
+        this.sharedWithName = null;
+
+        // If participants map is just the owner initially, add them
+        if (this.ownerUid != null && !this.participants.containsKey(this.ownerUid)) {
+            this.participants.put(this.ownerUid, true);
+        }
+    }
+
+    // Minimal constructor (existing) - ensure it initializes new fields
+    public Note(String content, String lastEditedByUid, long timestamp, Map<String, Boolean> participants) {
+        this("Untitled Note", content, lastEditedByUid, timestamp, participants); // Calls the other constructor
+        // The above call will handle initialization of new fields
+    }
+
+
+    // Getter for noteId
+    @Exclude
+    public String getNoteId() {
+        return noteId;
+    }
+
+    // Setter for noteId
+    @Exclude
+    public void setNoteId(String noteId) {
+        this.noteId = noteId;
+    }
+
+    // Getter for title
+    public String getTitle() {
+        return title;
+    }
+
+    // Setter for title
+    public void setTitle(String title) {
+        this.title = title;
+    }
+
+    // Getter for content
+    public String getContent() { return content; }
+    // Setter for content
+    public void setContent(String content) { this.content = content; }
+
+    // Getter for lastEditedByUid
+    public String getLastEditedByUid() { return lastEditedByUid; }
+    // Setter for lastEditedByUid
+    public void setLastEditedByUid(String lastEditedByUid) { this.lastEditedByUid = lastEditedByUid; }
+
+    // Getter for timestamp
+    public long getTimestamp() { return timestamp; }
+    // Setter for timestamp
+    public void setTimestamp(long timestamp) { this.timestamp = timestamp; }
+
+    // Getter for participants
+    public Map<String, Boolean> getParticipants() { return participants; }
+    // Setter for participants
+    public void setParticipants(Map<String, Boolean> participants) { this.participants = participants; }
+
+
+    // --- Getters and Setters for ADDED fields ---
+    public String getOwnerUid() {
+        return ownerUid;
+    }
+
+    public String getOwnerName() {
+        return ownerName;
+    }
+
+    public void setOwnerName(String ownerName) {
+        this.ownerName = ownerName;
+    }
+
+    public void setOwnerUid(String ownerUid) {
+        this.ownerUid = ownerUid;
+    }
+
+    public String getSharedWithUserId() {
+        return sharedWithUserId;
+    }
+
+    public void setSharedWithUserId(String sharedWithUserId) {
+        this.sharedWithUserId = sharedWithUserId;
+    }
+
+    public String getSharedWithName() {
+        return sharedWithName;
+    }
+
+    public void setSharedWithName(String sharedWithName) {
+        this.sharedWithName = sharedWithName;
+    }
+    // --- END Getters and Setters for ADDED fields ---
+
+    // Optional: Helper method to add a participant (if you manage this in code before saving)
+    @Exclude
+    public void addParticipant(String userId) {
+        if (this.participants == null) {
+            this.participants = new HashMap<>();
+        }
+        this.participants.put(userId, true);
+    }
+
+    @Exclude
+    public void removeParticipant(String userId) {
+        if (this.participants != null) {
+            this.participants.remove(userId);
+        }
+    }
+
+    // Helper to set the primary shared user for widget display
+    @Exclude
+    public void setPrimaryShare(String userId, String userName) {
+        this.sharedWithUserId = userId;
+        this.sharedWithName = userName;
+        // Optionally ensure this user is also in the participants list
+        if (userId != null) {
+            addParticipant(userId);
+        }
+    }
+}
