@@ -1,0 +1,871 @@
+package com.example.notetify.activities;
+
+import android.Manifest;
+import android.appwidget.AppWidgetManager;
+import android.content.ComponentName;
+import android.content.DialogInterface;
+import android.content.Intent;
+import android.content.SharedPreferences; //  ADDED for sync preference
+import android.content.pm.PackageManager;
+import android.os.Build;
+import android.os.Bundle;
+import android.util.Log;
+import android.view.Menu;
+import android.view.MenuInflater;
+import android.view.MenuItem;
+import android.view.View;
+import android.widget.Button;
+import android.widget.CompoundButton; //  ADDED for Switch listener
+import android.widget.ProgressBar;
+import android.widget.TextView;
+import android.widget.Toast;
+import java.util.HashMap;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.appcompat.widget.Toolbar;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+import androidx.preference.PreferenceManager; //  ADDED for sync preference
+import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.RecyclerView;
+
+import com.example.notetify.services.WidgetUpdateService;
+import com.google.android.gms.auth.api.signin.GoogleSignIn;
+import com.google.android.gms.auth.api.signin.GoogleSignInClient;
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions;
+import com.google.android.material.switchmaterial.SwitchMaterial; //  ADDED for the Switch
+import com.google.firebase.auth.FirebaseAuth;
+import com.google.firebase.auth.FirebaseUser;
+import com.google.firebase.database.DataSnapshot;
+import com.google.firebase.database.DatabaseError;
+import com.google.firebase.database.DatabaseReference;
+import com.google.firebase.database.FirebaseDatabase;
+import com.google.firebase.database.ValueEventListener;
+import com.example.notetify.R;
+import com.example.notetify.adapters.SharedNoteAdapter;
+import com.example.notetify.models.Note;
+import com.example.notetify.models.User;
+import com.example.notetify.widget.NoteWidgetProvider;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
+
+
+//  MODIFIED: Implement OnNoteLongClickListener (already present in your code)
+public class MainActivity extends AppCompatActivity implements SharedNoteAdapter.OnNoteClickListener, SharedNoteAdapter.OnNoteLongClickListener {
+
+    private static final String TAG = "MainActivity";
+    private static final int NOTIFICATION_PERMISSION_REQUEST_CODE = 101;
+    //  ADDED: Preference key for the sync toggle
+    public static final String PREF_WIDGET_SYNC_ENABLED = "pref_widget_sync_enabled";
+
+
+    private FirebaseAuth mAuth;
+    private GoogleSignInClient mGoogleSignInClient;
+    private FirebaseDatabase database;
+    private FirebaseUser currentUser;
+
+    private RecyclerView recyclerViewSharedNotes;
+    private SharedNoteAdapter sharedNoteAdapter;
+    private List<SharedNoteAdapter.NoteWrapper> sharedNotesList;
+    private ProgressBar progressBarMain;
+    private TextView textViewNoSharedNotes;
+
+    private DatabaseReference userNotesRef;
+    private ValueEventListener userNotesListener;
+
+    private Set<String> processedNoteIds = new HashSet<>();
+
+    //  ADDED: Variables for the sync switch
+    private SwitchMaterial switchBackgroundSync;
+    private SharedPreferences appPreferences;
+
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+        Log.d(TAG, "onCreate called");
+
+        //  ADDED: Initialize SharedPreferences
+        appPreferences = PreferenceManager.getDefaultSharedPreferences(this);
+
+        mAuth = FirebaseAuth.getInstance();
+        database = FirebaseDatabase.getInstance();
+        currentUser = mAuth.getCurrentUser();
+
+        if (currentUser == null) {
+            Log.d(TAG, "User not signed in, navigating to LoginActivity.");
+            startActivity(new Intent(this, LoginActivity.class));
+            finish();
+            return;
+        }
+        Log.d(TAG, "User " + currentUser.getUid() + " is signed in.");
+
+        Toolbar toolbar = findViewById(R.id.toolbarMain);
+        setSupportActionBar(toolbar);
+        if (getSupportActionBar() != null) {
+            getSupportActionBar().setTitle("My Notes"); // Set a default title
+        }
+
+
+        GoogleSignInOptions gso = new GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+                .requestIdToken(getString(R.string.default_web_client_id))
+                .requestEmail()
+                .build();
+        mGoogleSignInClient = GoogleSignIn.getClient(this, gso);
+
+        // --- ADDED: Setup for Switch ---
+        switchBackgroundSync = findViewById(R.id.switchBackgroundSync); // Make sure this ID exists in activity_main.xml
+        setupSyncSwitch();
+        // --- END Setup for Switch ---
+
+
+        Button buttonManageFriends = findViewById(R.id.buttonManageFriends);
+        buttonManageFriends.setOnClickListener(v -> {
+            Log.d(TAG, "Manage Friends button clicked.");
+            startActivity(new Intent(MainActivity.this, FriendsActivity.class));
+        });
+
+        Button buttonCreateNote = findViewById(R.id.buttonCreateNewNote); // Assuming you have this button
+        buttonCreateNote.setOnClickListener(v -> createNewNote());
+
+
+        recyclerViewSharedNotes = findViewById(R.id.recyclerViewSharedNotes);
+        progressBarMain = findViewById(R.id.progressBarMain);
+        textViewNoSharedNotes = findViewById(R.id.textViewNoSharedNotes);
+
+        recyclerViewSharedNotes.setLayoutManager(new LinearLayoutManager(this));
+        sharedNotesList = new ArrayList<>();
+        // Pass 'this' for both listeners to the adapter constructor (already present)
+        sharedNoteAdapter = new SharedNoteAdapter(sharedNotesList, currentUser.getUid(), this, this);
+        recyclerViewSharedNotes.setAdapter(sharedNoteAdapter);
+
+        userNotesRef = database.getReference("user_notes").child(currentUser.getUid());
+
+        requestNotificationPermission();
+    }
+
+    //  ADDED: Method to setup the sync switch
+    private void setupSyncSwitch() {
+        // Ensure switchBackgroundSync is not null before using it
+        if (switchBackgroundSync == null) {
+            Log.e(TAG, "switchBackgroundSync is null. Check layout ID.");
+            return;
+        }
+        boolean syncEnabled = appPreferences.getBoolean(PREF_WIDGET_SYNC_ENABLED, true); // Default to true
+        switchBackgroundSync.setChecked(syncEnabled);
+        Log.d(TAG, "Initial Sync Switch state: " + syncEnabled);
+
+        // If sync is enabled by default and widgets exist, ensure service is started
+        // This checkAndStartWidgetService might be called again in onResume, which is fine.
+        if (syncEnabled) {
+            checkAndStartWidgetService();
+        }
+
+        switchBackgroundSync.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            appPreferences.edit().putBoolean(PREF_WIDGET_SYNC_ENABLED, isChecked).apply();
+            Log.d(TAG, "Sync Switch toggled. New state: " + isChecked);
+            if (isChecked) {
+                Toast.makeText(MainActivity.this, "Widget auto-sync enabled.", Toast.LENGTH_SHORT).show();
+                checkAndStartWidgetService(); // Attempt to start if widgets exist
+            } else {
+                Toast.makeText(MainActivity.this, "Widget auto-sync disabled.", Toast.LENGTH_SHORT).show();
+                stopWidgetService();
+            }
+        });
+    }
+
+    private void requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+                    PackageManager.PERMISSION_GRANTED) {
+                Log.d(TAG, "Requesting POST_NOTIFICATIONS permission.");
+                ActivityCompat.requestPermissions(this,
+                        new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                        NOTIFICATION_PERMISSION_REQUEST_CODE);
+            } else {
+                Log.d(TAG, "POST_NOTIFICATIONS permission already granted.");
+                // If permission already granted, ensure service is started if widgets exist AND sync is enabled
+                if (appPreferences.getBoolean(PREF_WIDGET_SYNC_ENABLED, true)) {
+                    checkAndStartWidgetService();
+                }
+            }
+        } else {
+            // For pre-Tiramisu, permission is not needed
+            if (appPreferences.getBoolean(PREF_WIDGET_SYNC_ENABLED, true)) {
+                checkAndStartWidgetService();
+            }
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == NOTIFICATION_PERMISSION_REQUEST_CODE) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                Log.d(TAG, "POST_NOTIFICATIONS permission granted by user.");
+                if (appPreferences.getBoolean(PREF_WIDGET_SYNC_ENABLED, true)) {
+                    checkAndStartWidgetService();
+                }
+            } else {
+                Log.w(TAG, "POST_NOTIFICATIONS permission denied by user.");
+                Toast.makeText(this, "Notification permission denied. Widget auto-sync may not work as expected.", Toast.LENGTH_LONG).show();
+                // If permission is denied, and switch was on, consider turning the switch off
+                if (switchBackgroundSync != null && switchBackgroundSync.isChecked()) {
+                    switchBackgroundSync.setChecked(false); // Update UI
+                    // The listener on switch will handle saving pref and stopping service
+                }
+            }
+        }
+    }
+
+    // Helper to check if widgets exist and start service, RESPECTING USER PREFERENCE
+    private void checkAndStartWidgetService() {
+        if (currentUser == null) return; // Don't do anything if user isn't signed in
+
+        //  MODIFIED: Only start if the preference is ON
+        if (!appPreferences.getBoolean(PREF_WIDGET_SYNC_ENABLED, true)) {
+            Log.d(TAG, "checkAndStartWidgetService: Sync is disabled by user preference. Not starting service.");
+            // Ensure service is stopped if it was somehow running
+            stopWidgetService();
+            return;
+        }
+
+        AppWidgetManager appWidgetManager = AppWidgetManager.getInstance(this);
+        ComponentName thisWidgetProvider = new ComponentName(this, NoteWidgetProvider.class);
+        int[] allWidgetIds = appWidgetManager.getAppWidgetIds(thisWidgetProvider);
+
+        if (allWidgetIds != null && allWidgetIds.length > 0) {
+            Log.d(TAG, "Widgets exist and sync enabled. Ensuring WidgetUpdateService is running.");
+            Intent serviceIntent = new Intent(this, WidgetUpdateService.class);
+            // This action tells the service to verify its listeners for all active widgets
+            serviceIntent.setAction(WidgetUpdateService.ACTION_REFRESH_ALL_LISTENERS);
+            try {
+                ContextCompat.startForegroundService(this, serviceIntent);
+            } catch (Exception e) {
+                Log.e(TAG, "Error trying to start WidgetUpdateService from MainActivity", e);
+                // If service fails to start, reflect this in the switch and preference
+                if (switchBackgroundSync != null) {
+                    switchBackgroundSync.setChecked(false);
+                }
+                appPreferences.edit().putBoolean(PREF_WIDGET_SYNC_ENABLED, false).apply();
+                Toast.makeText(this, "Failed to start background sync service.", Toast.LENGTH_LONG).show();
+            }
+        } else {
+            Log.d(TAG, "No widgets found. Service will not be started from MainActivity (even if sync enabled).");
+            // If no widgets, we should also ensure the service is stopped
+            stopWidgetService();
+        }
+    }
+
+    //  ADDED: Method to explicitly stop the service
+    private void stopWidgetService() {
+        Log.d(TAG, "stopWidgetService: Attempting to stop WidgetUpdateService.");
+        Intent serviceIntent = new Intent(this, WidgetUpdateService.class);
+        stopService(serviceIntent);
+    }
+
+
+    private void createNewNote() {
+        if (currentUser == null) {
+            Toast.makeText(this, "You must be logged in to create a note.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Log.d(TAG, "createNewNote called by user: " + currentUser.getUid());
+
+        DatabaseReference notesRef = database.getReference("notes");
+        String newNoteId = notesRef.push().getKey();
+
+        if (newNoteId == null) {
+            Toast.makeText(this, "Failed to create new note ID.", Toast.LENGTH_SHORT).show();
+            Log.e(TAG, "Failed to generate newNoteId from Firebase push().");
+            return;
+        }
+
+        Note newNote = new Note();
+        newNote.setNoteId(newNoteId);
+        newNote.setTitle("New Note");
+        newNote.setContent("");
+        newNote.setOwnerUid(currentUser.getUid());
+        newNote.setOwnerName(currentUser.getDisplayName());
+        newNote.setLastEditedByUid(currentUser.getUid());
+        newNote.setTimestamp(System.currentTimeMillis());
+
+        Map<String, Boolean> participants = new HashMap<>();
+        participants.put(currentUser.getUid(), true);
+        newNote.setParticipants(participants);
+
+        notesRef.child(newNoteId).setValue(newNote).addOnCompleteListener(task -> {
+            if (task.isSuccessful()) {
+                Log.i(TAG, "New note created successfully with ID: " + newNoteId);
+                database.getReference("user_notes").child(currentUser.getUid()).child(newNoteId).setValue(true)
+                        .addOnCompleteListener(indexTask -> {
+                            if (indexTask.isSuccessful()) {
+                                Log.i(TAG, "New note ID added to user_notes index for user: " + currentUser.getUid());
+                                Intent intent = new Intent(MainActivity.this, NoteActivity.class);
+                                intent.putExtra(NoteActivity.EXTRA_NOTE_ID, newNoteId);
+                                startActivity(intent);
+                            } else {
+                                Log.e(TAG, "Failed to add new note ID to user_notes index.", indexTask.getException());
+                                Toast.makeText(MainActivity.this, "Note created, but failed to index. Please refresh.", Toast.LENGTH_LONG).show();
+                            }
+                        });
+            } else {
+                Log.e(TAG, "Failed to create new note.", task.getException());
+                Toast.makeText(MainActivity.this, "Failed to create note. " + (task.getException() != null ? task.getException().getMessage() : ""), Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        Log.d(TAG, "onResume called");
+        if (currentUser != null) {
+            // Update switch state from preferences every time activity resumes
+            if (switchBackgroundSync != null) { // Ensure switch is initialized
+                switchBackgroundSync.setChecked(appPreferences.getBoolean(PREF_WIDGET_SYNC_ENABLED, true));
+            } else {
+                Log.e(TAG, "onResume: switchBackgroundSync is null! Did findViewById fail or was called too late?");
+            }
+
+
+            processedNoteIds.clear();
+            sharedNotesList.clear();
+            progressBarMain.setVisibility(View.VISIBLE);
+            textViewNoSharedNotes.setVisibility(View.GONE);
+            recyclerViewSharedNotes.setVisibility(View.GONE);
+
+            attachUserNotesListener();
+
+            // Check and start/stop service based on preference
+            if (appPreferences.getBoolean(PREF_WIDGET_SYNC_ENABLED, true)) {
+                checkAndStartWidgetService();
+            } else {
+                stopWidgetService(); // Ensure it's stopped if preference is off
+            }
+        } else if (!isFinishing()){
+            Log.w(TAG, "onResume: User became null, finishing activity.");
+            Toast.makeText(this, "User session expired. Please log in again.", Toast.LENGTH_LONG).show();
+            signOut();
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        Log.d(TAG, "onPause called");
+        detachUserNotesListener();
+    }
+
+    private void attachUserNotesListener() {
+        if (userNotesRef == null || currentUser == null) {
+            Log.e(TAG, "Cannot attach user_notes listener: userNotesRef or currentUser is null.");
+            updateUIAfterFetchingAllNoteDetails(new ArrayList<>(), 0);
+            return;
+        }
+        Log.d(TAG, "Attaching user_notes listener to: " + userNotesRef.toString());
+
+        if (userNotesListener == null) {
+            userNotesListener = new ValueEventListener() {
+                @Override
+                public void onDataChange(@NonNull DataSnapshot dataSnapshot) {
+                    Log.d(TAG, "User_notes onDataChange. Snapshot exists: " + dataSnapshot.exists() + ", Children: " + dataSnapshot.getChildrenCount());
+                    List<String> noteIdsFromIndex = new ArrayList<>();
+                    if (dataSnapshot.exists()) {
+                        for (DataSnapshot noteIdSnapshot : dataSnapshot.getChildren()) {
+                            if (Boolean.TRUE.equals(noteIdSnapshot.getValue(Boolean.class)) && noteIdSnapshot.getKey() != null) {
+                                noteIdsFromIndex.add(noteIdSnapshot.getKey());
+                            }
+                        }
+                    }
+                    Log.d(TAG, "From user_notes: Found " + noteIdsFromIndex.size() + " note IDs.");
+                    processDiscoveredNoteIds(noteIdsFromIndex);
+                }
+
+                @Override
+                public void onCancelled(@NonNull DatabaseError databaseError) {
+                    Log.e(TAG, "Failed to load user_notes list.", databaseError.toException());
+                    updateUIAfterFetchingAllNoteDetails(new ArrayList<>(), 0);
+                    Toast.makeText(MainActivity.this, "Error loading your notes.", Toast.LENGTH_SHORT).show();
+                }
+            };
+            userNotesRef.addValueEventListener(userNotesListener);
+        } else {
+            Log.d(TAG, "User_notes listener already attached.");
+            if (sharedNotesList.isEmpty() && progressBarMain.getVisibility() == View.GONE) {
+                Log.d(TAG, "User_notes listener already attached, but list is empty. Forcing visibility update.");
+                progressBarMain.setVisibility(View.VISIBLE);
+                textViewNoSharedNotes.setVisibility(View.GONE);
+                recyclerViewSharedNotes.setVisibility(View.GONE);
+            }
+        }
+    }
+
+    private synchronized void processDiscoveredNoteIds(List<String> newNoteIdsFromUserNotesIndex) {
+        Log.d(TAG, "Processing " + newNoteIdsFromUserNotesIndex.size() + " note IDs from user_notes_listener: " + newNoteIdsFromUserNotesIndex);
+
+        Set<String> currentIdsInIndexSet = new HashSet<>(newNoteIdsFromUserNotesIndex);
+        List<SharedNoteAdapter.NoteWrapper> notesToRemove = new ArrayList<>();
+        boolean listChangedDueToRemoval = false;
+
+        // Iterate over a copy of sharedNotesList to safely remove items
+        for (SharedNoteAdapter.NoteWrapper existingWrapper : new ArrayList<>(sharedNotesList)) {
+            if (!currentIdsInIndexSet.contains(existingWrapper.noteId)) {
+                notesToRemove.add(existingWrapper);
+            }
+        }
+
+        if (!notesToRemove.isEmpty()) {
+            Log.d(TAG, "Removing " + notesToRemove.size() + " stale notes from UI: " + notesToRemove.stream().map(nw -> nw.noteId).collect(Collectors.toList()));
+            sharedNotesList.removeAll(notesToRemove);
+            // Also remove from processedNoteIds so they can be re-added if they reappear in index
+            for(SharedNoteAdapter.NoteWrapper removed : notesToRemove) {
+                processedNoteIds.remove(removed.noteId);
+            }
+            listChangedDueToRemoval = true;
+        }
+
+        List<String> notesToFetchDetailsFor = new ArrayList<>();
+        for (String noteIdFromIndex : newNoteIdsFromUserNotesIndex) {
+            // Check if it's already in processedNoteIds (meaning it's either in sharedNotesList or currently being fetched)
+            if (!processedNoteIds.contains(noteIdFromIndex)) {
+                notesToFetchDetailsFor.add(noteIdFromIndex);
+            }
+        }
+
+        if (!notesToFetchDetailsFor.isEmpty()) {
+            Log.d(TAG, "Identified " + notesToFetchDetailsFor.size() + " new notes to fetch details for.");
+            processedNoteIds.addAll(notesToFetchDetailsFor); // Add to processed before fetching
+            fetchAllNoteDetails(notesToFetchDetailsFor, newNoteIdsFromUserNotesIndex.size());
+        } else if (listChangedDueToRemoval) {
+            // Only removals occurred, update UI with the current (smaller) list
+            Log.d(TAG, "No new notes to fetch, but list changed due to removals. Refreshing UI.");
+            updateUIAfterFetchingAllNoteDetails(new ArrayList<>(sharedNotesList), newNoteIdsFromUserNotesIndex.size());
+        } else if (newNoteIdsFromUserNotesIndex.isEmpty() && sharedNotesList.isEmpty()) {
+            Log.d(TAG, "User_notes index is empty and UI list is empty. No notes to display.");
+            updateUIAfterFetchingAllNoteDetails(new ArrayList<>(), 0);
+        } else {
+            Log.d(TAG, "No changes to the note ID list requiring new fetches. Current UI might be up-to-date or just needs sorting.");
+            // If the progress bar is visible but the list isn't empty (e.g., after a refresh that found existing items), hide it.
+            if (progressBarMain.getVisibility() == View.VISIBLE) {
+                updateUIAfterFetchingAllNoteDetails(new ArrayList<>(sharedNotesList), newNoteIdsFromUserNotesIndex.size());
+            }
+        }
+    }
+
+
+    private void fetchAllNoteDetails(List<String> noteIdsToFetch, int totalNotesInIndex) {
+        Log.i(TAG, "fetchAllNoteDetails called for " + noteIdsToFetch.size() + " note IDs: " + noteIdsToFetch.toString());
+
+        if (noteIdsToFetch.isEmpty()) {
+            // If there are no new notes to fetch, but the UI might need an update (e.g., after removals or for sorting)
+            // or if the progress bar is still visible from a previous state.
+            updateUIAfterFetchingAllNoteDetails(new ArrayList<>(sharedNotesList), totalNotesInIndex);
+            return;
+        }
+
+        final AtomicInteger pendingFetches = new AtomicInteger(noteIdsToFetch.size());
+        DatabaseReference individualNoteRefRoot = database.getReference("notes");
+        final String currentUserIdLocal = currentUser.getUid();
+
+        // Show progress only if it's not already visible and we are indeed fetching
+        if (progressBarMain.getVisibility() == View.GONE) {
+            progressBarMain.setVisibility(View.VISIBLE);
+            textViewNoSharedNotes.setVisibility(View.GONE);
+            recyclerViewSharedNotes.setVisibility(View.GONE); // Hide while fetching new batch
+        }
+
+        final List<SharedNoteAdapter.NoteWrapper> newlyFetchedWrappers = new ArrayList<>();
+
+        for (String noteId : noteIdsToFetch) {
+            if (noteId == null || noteId.trim().isEmpty()){
+                Log.w(TAG, "Skipping null or empty noteId in fetchAllNoteDetails.");
+                if(pendingFetches.decrementAndGet() == 0) {
+                    synchronized (sharedNotesList) {
+                        sharedNotesList.addAll(newlyFetchedWrappers);
+                    }
+                    updateUIAfterFetchingAllNoteDetails(new ArrayList<>(sharedNotesList), totalNotesInIndex);
+                }
+                continue;
+            }
+            individualNoteRefRoot.child(noteId).addListenerForSingleValueEvent(new ValueEventListener() {
+                @Override
+                public void onDataChange(@NonNull DataSnapshot noteSnapshot) {
+                    Note note = noteSnapshot.getValue(Note.class);
+                    String currentFetchedNoteId = noteSnapshot.getKey();
+
+                    if (note != null && currentFetchedNoteId != null) {
+                        note.setNoteId(currentFetchedNoteId);
+                        String otherParticipantUid = null;
+                        if (note.getParticipants() != null) {
+                            for (Map.Entry<String, Boolean> entry : note.getParticipants().entrySet()) {
+                                if (Boolean.TRUE.equals(entry.getValue()) && entry.getKey() != null && !entry.getKey().equals(currentUserIdLocal)) {
+                                    otherParticipantUid = entry.getKey();
+                                    break;
+                                }
+                            }
+                        }
+                        fetchOtherParticipantNameAndPrepareWrapper(note, currentFetchedNoteId, otherParticipantUid, newlyFetchedWrappers, pendingFetches, totalNotesInIndex);
+                    } else {
+                        Log.w(TAG, "Note data is null or key missing for noteId: " + currentFetchedNoteId + ". Removing from processed.");
+                        processedNoteIds.remove(currentFetchedNoteId);
+                        if (pendingFetches.decrementAndGet() == 0) {
+                            synchronized (sharedNotesList) {
+                                sharedNotesList.addAll(newlyFetchedWrappers);
+                            }
+                            updateUIAfterFetchingAllNoteDetails(new ArrayList<>(sharedNotesList), totalNotesInIndex);
+                        }
+                    }
+                }
+
+                @Override
+                public void onCancelled(@NonNull DatabaseError databaseError) {
+                    Log.e(TAG, "Failed to fetch details for noteId: " + noteId, databaseError.toException());
+                    processedNoteIds.remove(noteId);
+                    if (pendingFetches.decrementAndGet() == 0) {
+                        synchronized (sharedNotesList) {
+                            sharedNotesList.addAll(newlyFetchedWrappers);
+                        }
+                        updateUIAfterFetchingAllNoteDetails(new ArrayList<>(sharedNotesList), totalNotesInIndex);
+                    }
+                }
+            });
+        }
+    }
+
+    private void fetchOtherParticipantNameAndPrepareWrapper(Note note, String noteId, @Nullable String otherParticipantUid,
+                                                            final List<SharedNoteAdapter.NoteWrapper> newlyFetchedWrappersList,
+                                                            final AtomicInteger pendingFetches,
+                                                            final int totalNotesInIndex) {
+        if (otherParticipantUid == null) {
+            String displayName;
+            if (note.getParticipants() != null && note.getParticipants().size() == 1 && note.getParticipants().containsKey(currentUser.getUid())) {
+                displayName = "Self Note";
+            } else if (note.getParticipants() == null || note.getParticipants().isEmpty()){
+                displayName = "Note (No participants)";
+            } else {
+                boolean onlyCurrentUser = true;
+                if (note.getParticipants() != null) {
+                    for (String participantId : note.getParticipants().keySet()) {
+                        if (participantId !=null && !participantId.equals(currentUser.getUid())) { // Added null check for participantId
+                            onlyCurrentUser = false;
+                            break;
+                        }
+                    }
+                }
+                displayName = onlyCurrentUser ? "Self Note" : "Group Note";
+            }
+
+            String primaryDisplay = (note.getTitle() != null && !note.getTitle().isEmpty() && !note.getTitle().equals("Untitled Note"))
+                    ? note.getTitle()
+                    : (note.getContent() != null && !note.getContent().isEmpty()
+                    ? note.getContent().substring(0, Math.min(30, note.getContent().length())) + (note.getContent().length() > 30 ? "..." : "")
+                    : "Note");
+
+            SharedNoteAdapter.NoteWrapper wrapper = new SharedNoteAdapter.NoteWrapper(note, noteId, primaryDisplay, displayName);
+            synchronized (newlyFetchedWrappersList) { newlyFetchedWrappersList.add(wrapper); }
+
+            if (pendingFetches.decrementAndGet() == 0) {
+                synchronized (sharedNotesList) {
+                    sharedNotesList.addAll(newlyFetchedWrappersList);
+                }
+                updateUIAfterFetchingAllNoteDetails(new ArrayList<>(sharedNotesList), totalNotesInIndex);
+            }
+            return;
+        }
+
+        DatabaseReference userRef = database.getReference("users").child(otherParticipantUid);
+        userRef.addListenerForSingleValueEvent(new ValueEventListener() {
+            @Override
+            public void onDataChange(@NonNull DataSnapshot snapshot) {
+                String otherName = "A Friend";
+                if (snapshot.exists()) {
+                    User user = snapshot.getValue(User.class);
+                    if (user != null && user.getDisplayName() != null && !user.getDisplayName().isEmpty()) {
+                        otherName = user.getDisplayName();
+                    } else if (user != null && user.getEmail() != null && !user.getEmail().isEmpty()) {
+                        otherName = user.getEmail();
+                    }
+                }
+                String primaryDisplay = (note.getTitle() != null && !note.getTitle().isEmpty() && !note.getTitle().equals("Untitled Note"))
+                        ? note.getTitle()
+                        : (note.getContent() != null && !note.getContent().isEmpty()
+                        ? note.getContent().substring(0, Math.min(30, note.getContent().length())) + (note.getContent().length() > 30 ? "..." : "")
+                        : "Note");
+
+                SharedNoteAdapter.NoteWrapper wrapper = new SharedNoteAdapter.NoteWrapper(note, noteId, primaryDisplay, otherName);
+                synchronized (newlyFetchedWrappersList) { newlyFetchedWrappersList.add(wrapper); }
+
+                if (pendingFetches.decrementAndGet() == 0) {
+                    synchronized (sharedNotesList) {
+                        sharedNotesList.addAll(newlyFetchedWrappersList);
+                    }
+                    updateUIAfterFetchingAllNoteDetails(new ArrayList<>(sharedNotesList), totalNotesInIndex);
+                }
+            }
+
+            @Override
+            public void onCancelled(@NonNull DatabaseError error) {
+                Log.w(TAG, "Could not fetch participant name for UID: " + otherParticipantUid, error.toException());
+                String primaryDisplay = (note.getTitle() != null && !note.getTitle().isEmpty() && !note.getTitle().equals("Untitled Note"))
+                        ? note.getTitle()
+                        : (note.getContent() != null && !note.getContent().isEmpty()
+                        ? note.getContent().substring(0, Math.min(30, note.getContent().length())) + (note.getContent().length() > 30 ? "..." : "")
+                        : "Note");
+                SharedNoteAdapter.NoteWrapper wrapper = new SharedNoteAdapter.NoteWrapper(note, noteId, primaryDisplay, "A Friend (details unavailable)");
+                synchronized (newlyFetchedWrappersList) { newlyFetchedWrappersList.add(wrapper); }
+
+                if (pendingFetches.decrementAndGet() == 0) {
+                    synchronized (sharedNotesList) {
+                        sharedNotesList.addAll(newlyFetchedWrappersList);
+                    }
+                    updateUIAfterFetchingAllNoteDetails(new ArrayList<>(sharedNotesList), totalNotesInIndex);
+                }
+            }
+        });
+    }
+
+    private void updateUIAfterFetchingAllNoteDetails(List<SharedNoteAdapter.NoteWrapper> currentNotesList, int totalNotesInIndexConsidered) {
+        // Sort the provided list (which should be the main sharedNotesList passed as a new ArrayList copy)
+        Collections.sort(currentNotesList, (o1, o2) -> {
+            if (o1 == null || o1.note == null || o1.note.getTimestamp() == 0L) return 1;
+            if (o2 == null || o2.note == null || o2.note.getTimestamp() == 0L) return -1;
+            return Long.compare(o2.note.getTimestamp(), o1.note.getTimestamp());
+        });
+
+        // Update the adapter with the sorted list
+        sharedNoteAdapter.updateNotes(currentNotesList);
+
+        Log.i(TAG, "updateUIAfterFetchingAllNoteDetails: Displaying " + currentNotesList.size() + " notes. Total notes in index considered: " + totalNotesInIndexConsidered);
+
+        progressBarMain.setVisibility(View.GONE);
+        if (currentNotesList.isEmpty()) {
+            textViewNoSharedNotes.setText("No notes yet. Create one!");
+            textViewNoSharedNotes.setVisibility(View.VISIBLE);
+            recyclerViewSharedNotes.setVisibility(View.GONE);
+        } else {
+            textViewNoSharedNotes.setVisibility(View.GONE);
+            recyclerViewSharedNotes.setVisibility(View.VISIBLE);
+        }
+    }
+
+
+    private void detachUserNotesListener() {
+        if (userNotesRef != null && userNotesListener != null) {
+            Log.d(TAG, "Detaching user_notes listener.");
+            userNotesRef.removeEventListener(userNotesListener);
+            userNotesListener = null;
+        }
+    }
+
+
+    @Override
+    public boolean onCreateOptionsMenu(Menu menu) {
+        MenuInflater inflater = getMenuInflater();
+        inflater.inflate(R.menu.main_menu, menu);
+        return true;
+    }
+
+    @Override
+    public boolean onOptionsItemSelected(@NonNull MenuItem item) {
+        int itemId = item.getItemId();
+        if (itemId == R.id.action_sign_out) {
+            signOut();
+            return true;
+        } else if (itemId == R.id.action_refresh_notes) {
+            Log.d(TAG, "Refresh notes action selected.");
+            if (currentUser != null) {
+                processedNoteIds.clear();
+                sharedNotesList.clear();
+                sharedNoteAdapter.updateNotes(new ArrayList<>(sharedNotesList));
+                progressBarMain.setVisibility(View.VISIBLE);
+                textViewNoSharedNotes.setVisibility(View.GONE);
+                recyclerViewSharedNotes.setVisibility(View.GONE);
+                detachUserNotesListener();
+                attachUserNotesListener();
+            }
+            return true;
+        }
+        return super.onOptionsItemSelected(item);
+    }
+
+    private void signOut() {
+        Log.d(TAG, "signOut called.");
+        //  ADDED: Stop the service when signing out
+        stopWidgetService();
+
+        mAuth.signOut();
+        if (mGoogleSignInClient != null) {
+            mGoogleSignInClient.signOut().addOnCompleteListener(this, task -> {
+                Log.d(TAG, "Google Sign-Out complete.");
+                navigateToLogin();
+            });
+        } else {
+            navigateToLogin();
+        }
+    }
+
+    private void navigateToLogin(){
+        Toast.makeText(MainActivity.this, "Signed out", Toast.LENGTH_SHORT).show();
+        Intent intent = new Intent(MainActivity.this, LoginActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        startActivity(intent);
+        finishAffinity();
+    }
+
+    @Override
+    public void onNoteClick(SharedNoteAdapter.NoteWrapper noteWrapper) {
+        if (noteWrapper != null && noteWrapper.noteId != null) {
+            Log.d(TAG, "Note clicked: ID = " + noteWrapper.noteId + ", Display = " + noteWrapper.displayTitle + ", With = " + noteWrapper.otherParticipantName);
+            Intent intent = new Intent(this, NoteActivity.class);
+            intent.putExtra(NoteActivity.EXTRA_NOTE_ID, noteWrapper.noteId);
+            startActivity(intent);
+        } else {
+            Log.e(TAG, "onNoteClick: noteWrapper or noteId is null!");
+            Toast.makeText(this, "Error opening note.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    public void onNoteLongClick(SharedNoteAdapter.NoteWrapper noteWrapper, View view) {
+        if (noteWrapper == null || noteWrapper.noteId == null || currentUser == null) {
+            Log.e(TAG, "onNoteLongClick: Invalid note data or user for deletion.");
+            return;
+        }
+        Log.d(TAG, "Long clicked note: ID = " + noteWrapper.noteId + ", Title: " + noteWrapper.displayTitle);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Delete Note")
+                .setMessage("Are you sure you want to delete the note: \"" + noteWrapper.displayTitle + "\"? This action cannot be undone.")
+                .setPositiveButton("Delete", (dialog, which) -> {
+                    deleteNoteFromFirebase(noteWrapper);
+                })
+                .setNegativeButton("Cancel", null)
+                .setIcon(android.R.drawable.ic_dialog_alert)
+                .show();
+    }
+
+    private void deleteNoteFromFirebase(SharedNoteAdapter.NoteWrapper noteWrapperToDelete) {
+        if (noteWrapperToDelete == null || noteWrapperToDelete.noteId == null || currentUser == null) {
+            Log.e(TAG, "deleteNoteFromFirebase: Cannot delete, invalid data.");
+            Toast.makeText(this, "Error: Could not delete note.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        final String noteIdToDelete = noteWrapperToDelete.noteId;
+        Log.d(TAG, "Attempting to delete note: " + noteIdToDelete);
+        progressBarMain.setVisibility(View.VISIBLE);
+
+        DatabaseReference mainNoteRef = database.getReference("notes").child(noteIdToDelete);
+        mainNoteRef.removeValue().addOnCompleteListener(task -> {
+            if (task.isSuccessful()) {
+                Log.i(TAG, "Successfully deleted note from /notes/" + noteIdToDelete);
+                DatabaseReference userNoteIndexRef = database.getReference("user_notes")
+                        .child(currentUser.getUid()).child(noteIdToDelete);
+                userNoteIndexRef.removeValue().addOnCompleteListener(indexTask -> {
+                    if (indexTask.isSuccessful()) {
+                        Log.i(TAG, "Successfully removed note ID " + noteIdToDelete + " from user_notes index for user " + currentUser.getUid());
+                        processedNoteIds.remove(noteIdToDelete);
+                        sharedNoteAdapter.removeNoteById(noteIdToDelete);
+                        updateUIAfterFetchingAllNoteDetails(new ArrayList<>(sharedNotesList), sharedNotesList.size() );
+
+                        if (noteWrapperToDelete.note != null && noteWrapperToDelete.note.getParticipants() != null) {
+                            for (String participantId : noteWrapperToDelete.note.getParticipants().keySet()) {
+                                if (participantId != null && !participantId.equals(currentUser.getUid())) { // Added null check
+                                    Log.d(TAG, "Needs to remove note " + noteIdToDelete + " from user_notes index of participant: " + participantId);
+                                    database.getReference("user_notes").child(participantId).child(noteIdToDelete).removeValue();
+                                }
+                            }
+                        }
+                        Toast.makeText(MainActivity.this, "Note deleted.", Toast.LENGTH_SHORT).show();
+
+                    } else {
+                        Log.e(TAG, "Failed to remove note ID " + noteIdToDelete + " from user_notes index.", indexTask.getException());
+                        Toast.makeText(MainActivity.this, "Note deleted, but failed to update your list. Please refresh.", Toast.LENGTH_LONG).show();
+                        processedNoteIds.remove(noteIdToDelete);
+                        sharedNoteAdapter.removeNoteById(noteIdToDelete);
+                        updateUIAfterFetchingAllNoteDetails(new ArrayList<>(sharedNotesList), sharedNotesList.size());
+                    }
+                });
+                sendBroadcastToUpdateWidgetsConfiguredForNote(noteIdToDelete);
+            } else {
+                Log.e(TAG, "Failed to delete note from /notes/" + noteIdToDelete, task.getException());
+                Toast.makeText(MainActivity.this, "Failed to delete note. " + (task.getException() != null ? task.getException().getMessage() : ""), Toast.LENGTH_SHORT).show();
+                progressBarMain.setVisibility(View.GONE);
+            }
+        });
+    }
+
+    private void sendBroadcastToUpdateWidgetsConfiguredForNote(String deletedNoteId) {
+        AppWidgetManager widgetManager = AppWidgetManager.getInstance(this);
+        ComponentName thisWidgetProvider = new ComponentName(this, NoteWidgetProvider.class);
+        int[] allWidgetIds = widgetManager.getAppWidgetIds(thisWidgetProvider);
+
+        if (allWidgetIds == null || allWidgetIds.length == 0) {
+            Log.d(TAG, "sendBroadcastToUpdateWidgets: No widgets to update for deleted note.");
+            return;
+        }
+
+        ArrayList<Integer> relevantWidgetIdsList = new ArrayList<>();
+        SharedPreferences widgetPrefs = getSharedPreferences(NoteWidgetConfigureActivity.PREFS_NAME, 0);
+
+        for (int appWidgetId : allWidgetIds) {
+            String configuredNoteId = widgetPrefs.getString(NoteWidgetConfigureActivity.PREF_KEY_NOTE_ID_PREFIX + appWidgetId, null);
+            if (deletedNoteId.equals(configuredNoteId)) {
+                relevantWidgetIdsList.add(appWidgetId);
+                NoteWidgetConfigureActivity.deleteWidgetPrefs(this, appWidgetId);
+            }
+        }
+
+        if (!relevantWidgetIdsList.isEmpty()) {
+            Intent intent = new Intent(this, NoteWidgetProvider.class);
+            intent.setAction(AppWidgetManager.ACTION_APPWIDGET_UPDATE);
+            int[] idsToUpdate = new int[relevantWidgetIdsList.size()];
+            for (int i = 0; i < relevantWidgetIdsList.size(); i++) {
+                idsToUpdate[i] = relevantWidgetIdsList.get(i);
+            }
+            intent.putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, idsToUpdate);
+            sendBroadcast(intent);
+            Log.i(TAG, "Sent ACTION_APPWIDGET_UPDATE broadcast for deleted note to widgets: " + relevantWidgetIdsList.toString());
+        } else {
+            Log.d(TAG, "No widgets found configured for the deleted noteId: " + deletedNoteId);
+        }
+    }
+
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        Log.d(TAG, "onDestroy called");
+        detachUserNotesListener();
+        //  ADDED: Consider stopping the service if the main activity is destroyed
+        //  and no widgets are active, though onDisabled in provider should handle it better
+        //  if (appPreferences.getBoolean(PREF_WIDGET_SYNC_ENABLED, true)) {
+        //      checkAndStopServiceIfNoWidgets();
+        //  }
+    }
+
+    //  ADDED: Helper to check if widgets are present and stop service if not.
+    //  This could be called in onDestroy or if user turns off sync.
+    private void checkAndStopServiceIfNoWidgets() {
+        AppWidgetManager appWidgetManager = AppWidgetManager.getInstance(this);
+        ComponentName thisWidgetProvider = new ComponentName(this, NoteWidgetProvider.class);
+        int[] allWidgetIds = appWidgetManager.getAppWidgetIds(thisWidgetProvider);
+        if (allWidgetIds == null || allWidgetIds.length == 0) {
+            Log.d(TAG, "No widgets active, stopping service from checkAndStopServiceIfNoWidgets.");
+            stopWidgetService();
+        }
+    }
+}
