@@ -1,0 +1,84 @@
+package com.example.notetify.models;
+
+import com.google.firebase.database.Exclude; // For excluding fields if needed
+import com.google.firebase.database.IgnoreExtraProperties; // Good practice
+
+import java.util.HashMap;
+import java.util.Map;
+
+@IgnoreExtraProperties // This tells Firebase to ignore any extra fields in the DB that aren't in this model
+public class User {
+    public String uid;
+    public String displayName;
+    public String email;
+    public Map<String, Boolean> friends; // To store friend UIDs as keys, and 'true' as value
+
+    // Default constructor is required for calls to DataSnapshot.getValue(User.class)
+    public User() {
+        // Initialize the map to prevent NullPointerExceptions if accessed before Firebase populates it
+        this.friends = new HashMap<>();
+    }
+
+    public User(String uid, String displayName, String email) {
+        this.uid = uid;
+        this.displayName = displayName;
+        this.email = email;
+        this.friends = new HashMap<>(); // Initialize here as well
+    }
+
+    // Getters
+    public String getUid() {
+        return uid;
+    }
+
+    public String getDisplayName() {
+        return displayName;
+    }
+
+    public String getEmail() {
+        return email;
+    }
+
+    public Map<String, Boolean> getFriends() {
+        return friends;
+    }
+
+    // Setters (Firebase needs these if fields are private, or just make fields public)
+    public void setUid(String uid) {
+        this.uid = uid;
+    }
+
+    public void setDisplayName(String displayName) {
+        this.displayName = displayName;
+    }
+
+    public void setEmail(String email) {
+        this.email = email;
+    }
+
+    public void setFriends(Map<String, Boolean> friends) {
+        this.friends = friends;
+    }
+
+    // Optional: Methods to manage friends if you do it client-side before saving to Firebase
+    // (Though typically you'd update the Firebase path directly)
+    @Exclude // Exclude from Firebase serialization if you don't want to save these helper methods as DB fields
+    public void addFriend(String friendUid) {
+        if (this.friends == null) {
+            this.friends = new HashMap<>();
+        }
+        this.friends.put(friendUid, true);
+    }
+
+    @Exclude
+    public void removeFriend(String friendUid) {
+        if (this.friends != null) {
+            this.friends.remove(friendUid);
+        }
+    }
+
+    @Exclude
+    public boolean isFriend(String friendUid) {
+        return this.friends != null && this.friends.containsKey(friendUid);
+    }
+}
