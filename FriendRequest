@@ -1,0 +1,26 @@
+package com.example.notetify.models;
+
+public class FriendRequest {
+    public String senderUid; // To store the key, which is the sender's UID
+    public String senderName; // To store the sender's name (denormalized for display)
+    public String status;
+    public long timestamp;
+
+    // Default constructor for Firebase
+    public FriendRequest() {}
+
+    public FriendRequest(String senderUid, String senderName, String status, long timestamp) {
+        this.senderUid = senderUid;
+        this.senderName = senderName;
+        this.status = status;
+        this.timestamp = timestamp;
+    }
+
+    // Getters (and setters if needed, though public fields are common for Firebase models)
+    public String getSenderUid() { return senderUid; }
+    public void setSenderUid(String senderUid) { this.senderUid = senderUid; }
+    public String getSenderName() { return senderName; }
+    public void setSenderName(String senderName) { this.senderName = senderName; }
+    public String getStatus() { return status; }
+    public long getTimestamp() { return timestamp; }
+}
