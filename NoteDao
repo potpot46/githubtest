@@ -1,0 +1,30 @@
+package com.example.notetify.db;
+
+import androidx.room.Dao;
+import androidx.room.Insert;
+import androidx.room.Query;
+import androidx.room.Update;
+import androidx.room.Delete;
+
+import java.util.List;
+
+@Dao
+public interface NoteDao {
+    @Insert
+    void insert(NoteEntity note);
+
+    @Update
+    void update(NoteEntity note);
+
+    @Delete
+    void delete(NoteEntity note);
+
+    @Query("DELETE FROM notes_table")
+    void deleteAllNotes();
+
+    @Query("SELECT * FROM notes_table ORDER BY timestamp DESC")
+    List<NoteEntity> getAllNotesList(); // Method used by your ConfigureActivity
+
+    @Query("SELECT * FROM notes_table WHERE id = :noteId")
+    NoteEntity getNoteByIdNow(int noteId); // Method used by your ConfigureActivity/Widget
+}
