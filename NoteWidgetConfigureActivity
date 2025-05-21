@@ -1,0 +1,386 @@
+package com.example.notetify.activities; // Your package
+
+import android.appwidget.AppWidgetManager;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.os.Bundle;
+import android.util.Log;
+import android.view.View;
+import android.widget.ArrayAdapter;
+import android.widget.Button;
+import android.widget.ProgressBar;
+import android.widget.Spinner;
+import android.widget.TextView;
+import android.widget.Toast;
+import java.util.Collections;
+import com.example.notetify.services.WidgetUpdateService; // <--- ADD THIS
+import androidx.core.content.ContextCompat;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.appcompat.app.AppCompatActivity;
+
+import com.example.notetify.R;
+import com.example.notetify.models.Note; // Your Firebase Note model
+import com.example.notetify.widget.NoteWidgetProvider; // Your Widget Provider
+import com.google.firebase.auth.FirebaseAuth;
+import com.google.firebase.auth.FirebaseUser;
+import com.google.firebase.database.DataSnapshot;
+import com.google.firebase.database.DatabaseError;
+import com.google.firebase.database.DatabaseReference;
+import com.google.firebase.database.FirebaseDatabase;
+import com.google.firebase.database.ValueEventListener;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class NoteWidgetConfigureActivity extends AppCompatActivity {
+
+    private static final String TAG = "NoteWidgetConfigure";
+
+    //  MODIFIED: Standardized SharedPreferences constants
+    public static final String PREFS_NAME = "com.example.notetify.NoteWidgetPrefs"; // Used by NoteActivity too
+    public static final String PREF_KEY_NOTE_ID_PREFIX = "widget_note_id_";
+    public static final String PREF_KEY_TITLE_PREFIX = "widget_title_";
+    public static final String PREF_KEY_CONTENT_PREFIX = "widget_content_";
+
+    // Old constants kept for reference during transition if needed, but should be replaced by above
+    // public static final String PREF_PREFIX_KEY_NOTE_ID = "firebase_note_id_for_widget_";
+    // public static final String PREF_PREFIX_KEY_NOTE_TITLE_SNIPPET = "firebase_note_title_snippet_for_widget_";
+    // public static final String PREF_PREFIX_KEY_NOTE_CONTENT_SNIPPET = "firebase_note_content_snippet_for_widget_";
+
+
+    int mAppWidgetId = AppWidgetManager.INVALID_APPWIDGET_ID;
+    Spinner spinnerNotes;
+    Button buttonConfigureWidget;
+    ProgressBar progressBarLoadingNotes;
+    TextView textViewNoNotesForWidget;
+
+    List<Note> availableFirebaseNotes;
+    List<String> spinnerNoteDisplayItems; // Stores strings for the spinner
+
+    FirebaseAuth mAuth;
+    FirebaseUser currentUser;
+    FirebaseDatabase database;
+
+    @Override
+    protected void onCreate(@Nullable Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setResult(RESULT_CANCELED); // Default result if user backs out
+        setContentView(R.layout.activity_note_widget_configure);
+        Log.d(TAG, "onCreate for widgetId: " + mAppWidgetId);
+
+        spinnerNotes = findViewById(R.id.spinner_notes);
+        buttonConfigureWidget = findViewById(R.id.button_configure_widget);
+        progressBarLoadingNotes = findViewById(R.id.progressBarLoadingWidgetNotes);
+        textViewNoNotesForWidget = findViewById(R.id.textViewNoNotesForWidget);
+
+        mAuth = FirebaseAuth.getInstance();
+        currentUser = mAuth.getCurrentUser();
+        database = FirebaseDatabase.getInstance();
+
+        Intent intent = getIntent();
+        Bundle extras = intent.getExtras();
+        if (extras != null) {
+            mAppWidgetId = extras.getInt(
+                    AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID);
+        }
+
+        // If an invalid ID or no user, finish immediately
+        if (mAppWidgetId == AppWidgetManager.INVALID_APPWIDGET_ID) {
+            Log.e(TAG, "Invalid AppWidgetId. Finishing configuration.");
+            finish();
+            return;
+        }
+        if (currentUser == null) {
+            Log.e(TAG, "User not logged in. Finishing configuration.");
+            Toast.makeText(this, "Please log in to configure widget.", Toast.LENGTH_LONG).show();
+            finish();
+            return;
+        }
+
+
+        availableFirebaseNotes = new ArrayList<>();
+        spinnerNoteDisplayItems = new ArrayList<>();
+
+        loadFirebaseNotesForSpinner();
+
+        buttonConfigureWidget.setOnClickListener(v -> configureWidget());
+    }
+
+    private void loadFirebaseNotesForSpinner() {
+        Log.d(TAG, "loadFirebaseNotesForSpinner called for widgetId: " + mAppWidgetId);
+        progressBarLoadingNotes.setVisibility(View.VISIBLE);
+        textViewNoNotesForWidget.setVisibility(View.GONE);
+        spinnerNotes.setVisibility(View.INVISIBLE); // Hide spinner while loading
+        buttonConfigureWidget.setEnabled(false);
+
+        String currentUserId = currentUser.getUid();
+        DatabaseReference userNotesRef = database.getReference("user_notes").child(currentUserId);
+        Log.d(TAG, "Loading notes from /user_notes/" + currentUserId);
+
+        userNotesRef.addListenerForSingleValueEvent(new ValueEventListener() {
+            @Override
+            public void onDataChange(@NonNull DataSnapshot userNotesSnapshot) {
+                availableFirebaseNotes.clear();
+                spinnerNoteDisplayItems.clear();
+
+                if (!userNotesSnapshot.exists() || userNotesSnapshot.getChildrenCount() == 0) {
+                    Log.d(TAG, "No notes found in /user_notes for user: " + currentUserId);
+                    updateSpinnerAndUiState(true, "No notes available for widget.");
+                    return;
+                }
+
+                List<String> noteIdsToFetchDetailsFor = new ArrayList<>();
+                for (DataSnapshot noteIdEntry : userNotesSnapshot.getChildren()) {
+                    if (noteIdEntry.getKey() != null && Boolean.TRUE.equals(noteIdEntry.getValue(Boolean.class))) {
+                        noteIdsToFetchDetailsFor.add(noteIdEntry.getKey());
+                    }
+                }
+
+                if (noteIdsToFetchDetailsFor.isEmpty()) {
+                    Log.d(TAG, "No valid note IDs extracted from /user_notes.");
+                    updateSpinnerAndUiState(true, "No notes available for widget.");
+                    return;
+                }
+                Log.d(TAG, "Found " + noteIdsToFetchDetailsFor.size() + " note IDs. Fetching details...");
+                fetchDetailsForTheseNotes(noteIdsToFetchDetailsFor);
+            }
+
+            @Override
+            public void onCancelled(@NonNull DatabaseError databaseError) {
+                Log.e(TAG, "Failed to load /user_notes for widget config.", databaseError.toException());
+                handleNoteLoadingError("Error loading notes index.");
+            }
+        });
+    }
+
+    private void fetchDetailsForTheseNotes(List<String> noteIds) {
+        final DatabaseReference notesRootRef = database.getReference("notes");
+        final int totalToFetch = noteIds.size();
+        final AtomicInteger fetchesCompleted = new AtomicInteger(0);
+        availableFirebaseNotes.clear(); // Clear before fetching new batch
+
+        if (totalToFetch == 0) { // Should be caught by previous checks, but good safeguard
+            updateSpinnerAndUiState(false, "No notes to fetch details for.");
+            return;
+        }
+
+        for (String noteId : noteIds) {
+            if (noteId == null || noteId.trim().isEmpty()) { // Safety check
+                Log.w(TAG, "Skipping null or empty noteId during detail fetch.");
+                if (fetchesCompleted.incrementAndGet() == totalToFetch) {
+                    updateSpinnerAndUiState(false, null); // Pass null to let it decide message based on availableFirebaseNotes
+                }
+                continue;
+            }
+            notesRootRef.child(noteId).addListenerForSingleValueEvent(new ValueEventListener() {
+                @Override
+                public void onDataChange(@NonNull DataSnapshot noteDetailSnapshot) {
+                    if (noteDetailSnapshot.exists()) {
+                        Note note = noteDetailSnapshot.getValue(Note.class);
+                        if (note != null) {
+                            note.setNoteId(noteDetailSnapshot.getKey());
+                            availableFirebaseNotes.add(note);
+                            Log.d(TAG, "Fetched detail for noteId: " + note.getNoteId() + ", Title: " + note.getTitle());
+                        } else {
+                            Log.w(TAG, "Note object null for noteId: " + noteDetailSnapshot.getKey() + " even though snapshot exists.");
+                        }
+                    } else {
+                        Log.w(TAG, "Note detail snapshot does not exist for noteId: " + noteDetailSnapshot.getKey());
+                    }
+
+                    if (fetchesCompleted.incrementAndGet() == totalToFetch) {
+                        updateSpinnerAndUiState(false, null);
+                    }
+                }
+
+                @Override
+                public void onCancelled(@NonNull DatabaseError databaseError) {
+                    Log.e(TAG, "Failed to fetch detail for noteId: " + noteId, databaseError.toException());
+                    // Consider not setting error message here if some notes load successfully
+                    if (fetchesCompleted.incrementAndGet() == totalToFetch) {
+                        updateSpinnerAndUiState(availableFirebaseNotes.isEmpty(), "Error fetching some note details.");
+                    }
+                }
+            });
+        }
+    }
+
+    private void handleNoteLoadingError(String errorMessage) {
+        progressBarLoadingNotes.setVisibility(View.GONE);
+        spinnerNoteDisplayItems.clear();
+        spinnerNoteDisplayItems.add(errorMessage); // Add error message to spinner itself
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(NoteWidgetConfigureActivity.this,
+                android.R.layout.simple_spinner_item, spinnerNoteDisplayItems);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerNotes.setAdapter(adapter);
+        spinnerNotes.setVisibility(View.VISIBLE);
+        textViewNoNotesForWidget.setText(errorMessage);
+        textViewNoNotesForWidget.setVisibility(View.VISIBLE);
+        buttonConfigureWidget.setEnabled(false);
+    }
+
+    private void updateSpinnerAndUiState(boolean errorOccurred, @Nullable String customMessageIfEmpty) {
+        spinnerNoteDisplayItems.clear();
+
+        if (!availableFirebaseNotes.isEmpty()) {
+            Collections.sort(availableFirebaseNotes, (o1, o2) -> { // Sort notes by timestamp
+                if (o1 == null || o1.getTimestamp() == 0L) return 1;
+                if (o2 == null || o2.getTimestamp() == 0L) return -1;
+                return Long.compare(o2.getTimestamp(), o1.getTimestamp()); // Newest first
+            });
+            for (Note note : availableFirebaseNotes) {
+                String title = (note.getTitle() != null && !note.getTitle().isEmpty() && !note.getTitle().equals("Untitled Note"))
+                        ? note.getTitle() : "Untitled";
+                String contentPreview = (note.getContent() != null && !note.getContent().isEmpty())
+                        ? (": " + note.getContent().substring(0, Math.min(20, note.getContent().length())) + (note.getContent().length() > 20 ? "..." : ""))
+                        : (title.equals("Untitled") ? ": (Empty Note)" : ""); // Show empty only if title is also default
+                spinnerNoteDisplayItems.add(title + contentPreview);
+            }
+        }
+
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(NoteWidgetConfigureActivity.this,
+                android.R.layout.simple_spinner_item, spinnerNoteDisplayItems);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerNotes.setAdapter(adapter);
+        progressBarLoadingNotes.setVisibility(View.GONE);
+        buttonConfigureWidget.setEnabled(!availableFirebaseNotes.isEmpty() && !errorOccurred);
+        spinnerNotes.setVisibility(View.VISIBLE);
+
+        if (availableFirebaseNotes.isEmpty()) {
+            String message = errorOccurred ? (customMessageIfEmpty != null ? customMessageIfEmpty : "Error loading notes.") :
+                    (customMessageIfEmpty != null ? customMessageIfEmpty : "No notes found to display.");
+            textViewNoNotesForWidget.setText(message);
+            textViewNoNotesForWidget.setVisibility(View.VISIBLE);
+        } else {
+            textViewNoNotesForWidget.setVisibility(View.GONE);
+        }
+    }
+
+    // In NoteWidgetConfigureActivity.java
+// In NoteWidgetConfigureActivity.java
+
+    private void configureWidget() {
+        if (availableFirebaseNotes.isEmpty() || spinnerNotes.getSelectedItemPosition() < 0 ||
+                spinnerNotes.getSelectedItemPosition() >= availableFirebaseNotes.size()) {
+            Toast.makeText(this, "Please select a valid note from the list or wait for notes to load.", Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        Note selectedFirebaseNote = availableFirebaseNotes.get(spinnerNotes.getSelectedItemPosition());
+        String firebaseNoteId = selectedFirebaseNote.getNoteId();
+
+        if (firebaseNoteId == null || firebaseNoteId.trim().isEmpty()) {
+            Toast.makeText(this, "Selected note has an invalid ID.", Toast.LENGTH_SHORT).show();
+            Log.e(TAG, "Selected note for widget " + mAppWidgetId + " has null or empty firebaseNoteId.");
+            return;
+        }
+
+        // --- RESTORED LOGIC for getting actual title and content ---
+        String actualNoteTitle = (selectedFirebaseNote.getTitle() != null && !selectedFirebaseNote.getTitle().isEmpty()) ?
+                selectedFirebaseNote.getTitle() : "Untitled Note";
+        String actualNoteContent = (selectedFirebaseNote.getContent() != null && !selectedFirebaseNote.getContent().isEmpty()) ?
+                selectedFirebaseNote.getContent() : "(Empty Note)";
+        // --- END RESTORED LOGIC ---
+
+        // Determine the display title for the widget (could be "Shared with: Name" or actual title)
+        String widgetDisplayTitle = actualNoteTitle; // Default to actual title
+        if (selectedFirebaseNote.getSharedWithName() != null && !selectedFirebaseNote.getSharedWithName().isEmpty()) {
+            widgetDisplayTitle = "Note shared with: " + selectedFirebaseNote.getSharedWithName();
+        } else if (selectedFirebaseNote.getSharedWithUserId() != null && !selectedFirebaseNote.getSharedWithUserId().isEmpty() &&
+                currentUser != null && !currentUser.getUid().equals(selectedFirebaseNote.getSharedWithUserId())) {
+            // If sharedWithUserId is present but name isn't (and it's not self), show a placeholder
+            // This part can be enhanced if you fetch the name here, but for now, a generic shared title.
+            // Or, if owner is known and current user is not owner but is sharedWithUserId
+            if (selectedFirebaseNote.getOwnerUid() != null && !selectedFirebaseNote.getOwnerUid().equals(currentUser.getUid()) && currentUser.getUid().equals(selectedFirebaseNote.getSharedWithUserId())) {
+                widgetDisplayTitle = "Note from: " + (selectedFirebaseNote.getOwnerName() != null ? selectedFirebaseNote.getOwnerName() : "a friend"); // Assuming Note has getOwnerName()
+            } else if (selectedFirebaseNote.getOwnerUid() != null && currentUser.getUid().equals(selectedFirebaseNote.getOwnerUid())) {
+                widgetDisplayTitle = "Shared: " + selectedFirebaseNote.getSharedWithUserId().substring(0, Math.min(6, selectedFirebaseNote.getSharedWithUserId().length())) + "...";
+            } else {
+                widgetDisplayTitle = "Shared Note";
+            }
+        }
+        // If it's the user's own note and not specifically marked as shared for widget display
+        else if (currentUser != null && selectedFirebaseNote.getOwnerUid() != null && selectedFirebaseNote.getOwnerUid().equals(currentUser.getUid())) {
+            widgetDisplayTitle = actualNoteTitle; // Just show the actual title
+        }
+
+
+        // Save snippets for SharedPreferences
+        String titleSnippetForPrefs = widgetDisplayTitle;
+        if (titleSnippetForPrefs.length() > 50) titleSnippetForPrefs = titleSnippetForPrefs.substring(0, 47) + "...";
+
+        String contentSnippetForPrefs = actualNoteContent;
+        if (contentSnippetForPrefs.length() > 100) contentSnippetForPrefs = contentSnippetForPrefs.substring(0, 97) + "...";
+        if (contentSnippetForPrefs.isEmpty() && actualNoteTitle.equals("Untitled Note") && widgetDisplayTitle.equals("Untitled Note")) {
+            contentSnippetForPrefs = "(Empty Note)";
+        }
+
+
+        saveWidgetPrefs(this, mAppWidgetId, firebaseNoteId, titleSnippetForPrefs, contentSnippetForPrefs);
+
+        AppWidgetManager appWidgetManager = AppWidgetManager.getInstance(this);
+        // For the *initial* update from configure, pass the determined widgetDisplayTitle and actualNoteContent
+        NoteWidgetProvider.updateAppWidgetInstance(this, appWidgetManager, mAppWidgetId, firebaseNoteId, widgetDisplayTitle, actualNoteContent);
+
+        // Tell the service to start listening for this newly configured widget
+        Intent serviceIntent = new Intent(this, WidgetUpdateService.class);
+        serviceIntent.setAction(WidgetUpdateService.ACTION_START_LISTENING);
+        serviceIntent.putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, mAppWidgetId);
+        serviceIntent.putExtra(NoteActivity.EXTRA_NOTE_ID, firebaseNoteId); // Use a consistent key for note ID
+        try {
+            ContextCompat.startForegroundService(this, serviceIntent);
+            Log.d(TAG, "Sent ACTION_START_LISTENING to service for new widgetId: " + mAppWidgetId);
+        } catch (Exception e) {
+            Log.e(TAG, "Error sending START_LISTENING to service from configureWidget", e);
+        }
+
+        Intent resultValue = new Intent();
+        resultValue.putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, mAppWidgetId);
+        setResult(RESULT_OK, resultValue);
+        Log.d(TAG, "Widget configured for widget ID: " + mAppWidgetId + " with Firebase note ID: " + firebaseNoteId + ", Display Title: " + widgetDisplayTitle);
+        finish();
+    }
+
+    // SharedPreferences helper methods
+    public static void saveWidgetPrefs(Context context, int appWidgetId, String firebaseNoteId, String titleSnippet, String contentSnippet) {
+        SharedPreferences.Editor prefs = context.getSharedPreferences(PREFS_NAME, 0).edit();
+        prefs.putString(PREF_KEY_NOTE_ID_PREFIX + appWidgetId, firebaseNoteId);
+        prefs.putString(PREF_KEY_TITLE_PREFIX + appWidgetId, titleSnippet); // Use new key
+        prefs.putString(PREF_KEY_CONTENT_PREFIX + appWidgetId, contentSnippet); // Use new key
+        prefs.apply();
+        Log.d(TAG, "Saved Prefs for widgetId " + appWidgetId + ": NoteId=" + firebaseNoteId + ", TitleSnippet=\"" + titleSnippet + "\", ContentSnippet=\"" + contentSnippet.substring(0, Math.min(20,contentSnippet.length())) + "...\"");
+    }
+
+    public static String loadFirebaseNoteIdPref(Context context, int appWidgetId) {
+        SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, 0);
+        String noteId = prefs.getString(PREF_KEY_NOTE_ID_PREFIX + appWidgetId, null);
+        return noteId;
+    }
+
+    public static String loadFirebaseNoteTitlePref(Context context, int appWidgetId) {
+        SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, 0);
+        // Provide a sensible default if the title snippet isn't found
+        String title = prefs.getString(PREF_KEY_TITLE_PREFIX + appWidgetId, "NoteTify Note");
+        return title;
+    }
+
+    public static String loadFirebaseNoteContentSnippetPref(Context context, int appWidgetId) {
+        SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, 0);
+        // Provide a sensible default if the content snippet isn't found
+        String snippet = prefs.getString(PREF_KEY_CONTENT_PREFIX + appWidgetId, "Content unavailable");
+        return snippet;
+    }
+
+    public static void deleteWidgetPrefs(Context context, int appWidgetId) {
+        SharedPreferences.Editor prefs = context.getSharedPreferences(PREFS_NAME, 0).edit();
+        prefs.remove(PREF_KEY_NOTE_ID_PREFIX + appWidgetId);
+        prefs.remove(PREF_KEY_TITLE_PREFIX + appWidgetId);
+        prefs.remove(PREF_KEY_CONTENT_PREFIX + appWidgetId);
+        prefs.apply();
+        Log.d(TAG, "Deleted prefs for widgetId " + appWidgetId);
+    }
+}
