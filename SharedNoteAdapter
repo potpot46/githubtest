@@ -1,0 +1,155 @@
+package com.example.notetify.adapters;
+
+import android.view.LayoutInflater;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.TextView;
+import androidx.annotation.NonNull;
+import androidx.recyclerview.widget.RecyclerView;
+import com.example.notetify.R;
+import com.example.notetify.models.Note;
+import java.util.List;
+import java.util.ArrayList;
+// No duplicate R import needed
+
+public class SharedNoteAdapter extends RecyclerView.Adapter<SharedNoteAdapter.NoteViewHolder> {
+
+    private List<NoteWrapper> noteWrappers;
+    private final String currentUserId;
+    private final OnNoteClickListener clickListener;
+    private final OnNoteLongClickListener longClickListener; //  ADDED: Long click listener
+
+    // Interface for simple clicks
+    public interface OnNoteClickListener {
+        void onNoteClick(NoteWrapper noteWrapper);
+    }
+
+    //  ADDED: Interface for long clicks
+    public interface OnNoteLongClickListener {
+        void onNoteLongClick(NoteWrapper noteWrapper, View view); // Pass view for potential context menu anchor
+    }
+
+    public static class NoteWrapper {
+        public Note note;
+        public String noteId;
+        public String displayTitle;
+        public String otherParticipantName;
+
+        public NoteWrapper(Note note, String noteId, String displayTitle, String otherParticipantName) {
+            this.note = note;
+            this.noteId = noteId;
+            this.displayTitle = displayTitle;
+            this.otherParticipantName = otherParticipantName;
+        }
+    }
+
+    //  MODIFIED: Constructor to accept OnNoteLongClickListener
+    public SharedNoteAdapter(List<NoteWrapper> noteWrappers, String currentUserId,
+                             OnNoteClickListener clickListener, OnNoteLongClickListener longClickListener) {
+        this.noteWrappers = noteWrappers != null ? noteWrappers : new ArrayList<>();
+        this.currentUserId = currentUserId;
+        this.clickListener = clickListener;
+        this.longClickListener = longClickListener; //  ADDED
+    }
+
+    @NonNull
+    @Override
+    public NoteViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
+        View view = LayoutInflater.from(parent.getContext())
+                .inflate(R.layout.item_shared_note, parent, false);
+        return new NoteViewHolder(view);
+    }
+
+    @Override
+    public void onBindViewHolder(@NonNull NoteViewHolder holder, int position) {
+        NoteWrapper wrapper = noteWrappers.get(position);
+        holder.bind(wrapper, clickListener, longClickListener); //  MODIFIED: Pass longClickListener
+    }
+
+    @Override
+    public int getItemCount() {
+        return noteWrappers != null ? noteWrappers.size() : 0;
+    }
+
+    public void updateNotes(List<NoteWrapper> newNoteWrappers) {
+        this.noteWrappers.clear();
+        if (newNoteWrappers != null) {
+            this.noteWrappers.addAll(newNoteWrappers);
+        }
+        notifyDataSetChanged(); // Consider using DiffUtil for better performance
+    }
+
+    // Method to remove a note from the list and notify the adapter
+    public void removeNote(NoteWrapper noteWrapper) {
+        int position = noteWrappers.indexOf(noteWrapper);
+        if (position != -1) {
+            noteWrappers.remove(position);
+            notifyItemRemoved(position);
+            // Optional: notifyItemRangeChanged if positions below need updating
+            // notifyItemRangeChanged(position, noteWrappers.size());
+        }
+    }
+    public void removeNoteById(String noteId) {
+        for (int i = 0; i < noteWrappers.size(); i++) {
+            if (noteWrappers.get(i).noteId.equals(noteId)) {
+                noteWrappers.remove(i);
+                notifyItemRemoved(i);
+                // Optional: notifyItemRangeChanged if positions below need updating
+                // notifyItemRangeChanged(i, noteWrappers.size());
+                return;
+            }
+        }
+    }
+
+
+    static class NoteViewHolder extends RecyclerView.ViewHolder {
+        TextView textViewNoteTitleOrSnippet;
+        TextView textViewSharedWith;
+        TextView textViewLastEdited;
+
+        NoteViewHolder(View itemView) {
+            super(itemView);
+            textViewNoteTitleOrSnippet = itemView.findViewById(R.id.textViewNoteTitleOrSnippet);
+            textViewSharedWith = itemView.findViewById(R.id.textViewSharedWith);
+            textViewLastEdited = itemView.findViewById(R.id.textViewLastEdited);
+        }
+
+        //  MODIFIED: bind method to handle long click
+        void bind(final NoteWrapper wrapper, final OnNoteClickListener clickListener, final OnNoteLongClickListener longClickListener) {
+            if (wrapper.note != null) {
+                textViewNoteTitleOrSnippet.setText(wrapper.displayTitle != null ? wrapper.displayTitle : "Note");
+                textViewSharedWith.setText("With: " + wrapper.otherParticipantName);
+
+                if (wrapper.note.getTimestamp() > 0) {
+                    java.text.DateFormat dateFormat = android.text.format.DateFormat.getDateFormat(itemView.getContext());
+                    java.text.DateFormat timeFormat = android.text.format.DateFormat.getTimeFormat(itemView.getContext());
+                    String formattedDate = dateFormat.format(new java.util.Date(wrapper.note.getTimestamp()));
+                    String formattedTime = timeFormat.format(new java.util.Date(wrapper.note.getTimestamp()));
+                    textViewLastEdited.setText("Last edited: " + formattedDate + " " + formattedTime);
+                    textViewLastEdited.setVisibility(View.VISIBLE);
+                } else {
+                    textViewLastEdited.setVisibility(View.GONE);
+                }
+            } else {
+                textViewNoteTitleOrSnippet.setText("Error loading note");
+                textViewSharedWith.setText("");
+                textViewLastEdited.setVisibility(View.GONE);
+            }
+
+            itemView.setOnClickListener(v -> {
+                if (clickListener != null) {
+                    clickListener.onNoteClick(wrapper);
+                }
+            });
+
+            //  ADDED: Set OnLongClickListener
+            itemView.setOnLongClickListener(v -> {
+                if (longClickListener != null) {
+                    longClickListener.onNoteLongClick(wrapper, v);
+                    return true; // Consume the long click
+                }
+                return false;
+            });
+        }
+    }
+}
