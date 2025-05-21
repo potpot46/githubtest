@@ -1,0 +1,215 @@
+package com.example.notetify.activities;
+
+import android.content.Intent;
+import android.os.Bundle;
+import android.util.Log;
+import android.view.View;
+import android.widget.ProgressBar;
+import android.widget.Toast;
+
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.annotation.NonNull;
+import androidx.appcompat.app.AppCompatActivity;
+
+import com.google.android.gms.auth.api.signin.GoogleSignIn;
+import com.google.android.gms.auth.api.signin.GoogleSignInAccount;
+import com.google.android.gms.auth.api.signin.GoogleSignInClient;
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions;
+import com.google.android.gms.common.SignInButton;
+import com.google.android.gms.common.api.ApiException;
+import com.google.android.gms.tasks.OnCompleteListener;
+import com.google.android.gms.tasks.Task;
+import com.google.firebase.auth.AuthCredential;
+import com.google.firebase.auth.AuthResult;
+import com.google.firebase.auth.FirebaseAuth;
+import com.google.firebase.auth.FirebaseUser;
+import com.google.firebase.auth.GoogleAuthProvider;
+import com.google.firebase.database.DatabaseReference;
+import com.google.firebase.database.FirebaseDatabase;
+import com.example.notetify.R; // CHANGE TO YOUR PACKAGE
+import com.example.notetify.models.User; // CHANGE TO YOUR PACKAGE
+import com.google.firebase.database.DataSnapshot; // <--- ADD THIS IMPORT
+import com.google.firebase.database.DatabaseError; // <--- ADD THIS IMPORT
+import com.google.firebase.database.ValueEventListener; // <--- ADD THIS IMPORT
+import java.util.Map; // <--- ADD THIS
+import java.util.HashMap; // <--- ADD THIS
+
+public class LoginActivity extends AppCompatActivity {
+
+    private static final String TAG = "LoginActivity";
+    private FirebaseAuth mAuth;
+    private GoogleSignInClient mGoogleSignInClient;
+    private SignInButton signInButton;
+    private ProgressBar progressBar;
+    private FirebaseDatabase database;
+
+    // ActivityResultLauncher for the Google Sign-In intent
+    private final ActivityResultLauncher<Intent> googleSignInLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (result.getResultCode() == RESULT_OK) {
+                    Intent data = result.getData();
+                    Task<GoogleSignInAccount> task = GoogleSignIn.getSignedInAccountFromIntent(data);
+                    try {
+                        GoogleSignInAccount account = task.getResult(ApiException.class);
+                        if (account != null) {
+                            Log.d(TAG, "Google Sign-In successful, attempting Firebase Auth.");
+                            firebaseAuthWithGoogle(account);
+                        } else {
+                            Log.w(TAG, "Google sign in failed: GoogleSignInAccount is null");
+                            onSignInAttemptFailed("Google Sign-In account was not retrieved.");
+                        }
+                    } catch (ApiException e) {
+                        Log.w(TAG, "Google sign in failed with ApiException: " + e.getStatusCode(), e);
+                        String errorMessage = "Google Sign-In failed. Error code: " + e.getStatusCode();
+                        if (e.getStatusCode() == com.google.android.gms.common.api.CommonStatusCodes.NETWORK_ERROR) {
+                            errorMessage = "Network error during Google Sign-In. Please check your connection.";
+                        } else if (e.getStatusCode() == com.google.android.gms.common.api.CommonStatusCodes.SIGN_IN_REQUIRED) {
+                            errorMessage = "Sign-in is required."; // Should ideally re-trigger signIn()
+                        }
+                        onSignInAttemptFailed(errorMessage);
+                    }
+                } else {
+                    // This block is hit if the user cancels the Google Sign-In account picker or flow
+                    Log.w(TAG, "Google sign in cancelled or failed by user. Result code: " + result.getResultCode());
+                    onSignInAttemptFailed("Google Sign-In was cancelled.");
+                }
+            });
+
+    private void onSignInAttemptFailed(String message) {
+        if (progressBar != null) progressBar.setVisibility(View.GONE);
+        if (signInButton != null) signInButton.setEnabled(true); // Re-enable button
+        Toast.makeText(LoginActivity.this, message, Toast.LENGTH_LONG).show();
+    }
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_login); // Ensure this layout exists
+
+        mAuth = FirebaseAuth.getInstance();
+        database = FirebaseDatabase.getInstance();
+
+        // Configure Google Sign In
+        // It's important that R.string.default_web_client_id comes from your google-services.json
+        GoogleSignInOptions gso = new GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+                .requestIdToken(getString(R.string.default_web_client_id))
+                .requestEmail() // Request email to store in user profile
+                .build();
+        mGoogleSignInClient = GoogleSignIn.getClient(this, gso);
+
+        signInButton = findViewById(R.id.signInButton);
+        progressBar = findViewById(R.id.progressBar);
+
+        // Check if user is already signed in to Firebase
+        if (mAuth.getCurrentUser() != null) {
+            Log.d(TAG, "User already signed in to Firebase. Navigating to Main.");
+            navigateToMain();
+        } else {
+            // If not signed into Firebase, make the sign-in button visible and primary action.
+            // The Google Sign-In SDK handles the account picker.
+            signInButton.setVisibility(View.VISIBLE);
+        }
+
+        signInButton.setOnClickListener(v -> {
+            Log.d(TAG, "Sign-in button clicked.");
+            signInWithGoogle();
+        });
+    }
+
+    private void signInWithGoogle() {
+        progressBar.setVisibility(View.VISIBLE);
+        signInButton.setEnabled(false); // Disable button during sign-in attempt
+
+        // Start the Google Sign-In flow.
+        // The GoogleSignInClient.getSignInIntent() will automatically show the account picker
+        // if multiple accounts are configured on the device.
+        Intent signInIntent = mGoogleSignInClient.getSignInIntent();
+        googleSignInLauncher.launch(signInIntent);
+    }
+
+    private void firebaseAuthWithGoogle(GoogleSignInAccount acct) {
+        Log.d(TAG, "firebaseAuthWithGoogle:" + acct.getId());
+        AuthCredential credential = GoogleAuthProvider.getCredential(acct.getIdToken(), null);
+        mAuth.signInWithCredential(credential)
+                .addOnCompleteListener(this, new OnCompleteListener<AuthResult>() {
+                    @Override
+                    public void onComplete(@NonNull Task<AuthResult> task) {
+                        if (task.isSuccessful()) {
+                            Log.d(TAG, "Firebase signInWithCredential:success");
+                            FirebaseUser firebaseUser = mAuth.getCurrentUser();
+                            if (firebaseUser != null) {
+                                saveUserToDatabase(firebaseUser.getUid(),
+                                        firebaseUser.getDisplayName(), // This comes from Google
+                                        firebaseUser.getEmail());      // This also comes from Google
+                            }
+                            navigateToMain();
+                        } else {
+                            Log.w(TAG, "Firebase signInWithCredential:failure", task.getException());
+                            onSignInAttemptFailed("Firebase Authentication Failed.");
+                        }
+                    }
+                });
+    }
+
+    private void saveUserToDatabase(String uid, String displayName, String email) {
+        if (displayName == null && email == null) {
+            Log.d(TAG, "Not saving user to DB as display name and email are null.");
+            return;
+        }
+
+        User user = new User(uid, displayName, email);
+        DatabaseReference userRef = database.getReference("users").child(uid);
+
+        userRef.addListenerForSingleValueEvent(new ValueEventListener() { // This now should resolve
+            @Override
+            public void onDataChange(@NonNull DataSnapshot snapshot) { // DataSnapshot should resolve
+                if (!snapshot.exists()) {
+                    userRef.setValue(user)
+                            .addOnSuccessListener(aVoid -> Log.d(TAG, "New user profile saved to DB."))
+                            .addOnFailureListener(e -> Log.w(TAG, "Error saving new user profile", e));
+                } else {
+                    Map<String, Object> updates = new HashMap<>();
+                    if (displayName != null && !displayName.equals(snapshot.child("displayName").getValue(String.class))) {
+                        updates.put("displayName", displayName);
+                    }
+                    if (email != null && !email.equals(snapshot.child("email").getValue(String.class))) {
+                        updates.put("email", email);
+                    }
+                    if (!updates.isEmpty()) {
+                        userRef.updateChildren(updates)
+                                .addOnSuccessListener(aVoid -> Log.d(TAG, "User profile updated in DB."))
+                                .addOnFailureListener(e -> Log.w(TAG, "Error updating user profile", e));
+                    } else {
+                        Log.d(TAG, "User profile already up-to-date in DB.");
+                    }
+                }
+            }
+
+            @Override
+            public void onCancelled(@NonNull DatabaseError error) { // DatabaseError should resolve
+                Log.w(TAG, "Error checking user profile in DB", error.toException());
+            }
+        });
+    }
+
+    private void navigateToMain() {
+        if (progressBar != null) progressBar.setVisibility(View.GONE);
+        Intent intent = new Intent(LoginActivity.this, MainActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        startActivity(intent);
+        finish(); // Finish LoginActivity so user can't go back to it with back button
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        // Check if user is signed in (Firebase Auth) on Activity start.
+        // If mAuth.getCurrentUser() is non-null, onAuthticate() can be called.
+        // This is already handled in onCreate, but good to be aware of lifecycle.
+        // FirebaseUser currentUser = mAuth.getCurrentUser();
+        // if (currentUser != null) {
+        //     navigateToMain();
+        // }
+    }
+}
