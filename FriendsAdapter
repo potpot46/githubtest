@@ -1,0 +1,98 @@
+package com.example.notetify.adapters;
+
+import android.util.Log; // Make sure this is imported
+import android.view.LayoutInflater;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Button;
+import android.widget.TextView;
+import androidx.annotation.NonNull;
+import androidx.recyclerview.widget.RecyclerView;
+import com.example.notetify.R;
+import com.example.notetify.models.User;
+import java.util.List;
+import java.util.ArrayList;
+
+public class FriendsAdapter extends RecyclerView.Adapter<FriendsAdapter.FriendViewHolder> {
+
+    // Define TAG for logging at the class level
+    private static final String TAG = "FriendsAdapter";
+
+    private List<User> friendsList;
+    private final OnFriendInteractionListener listener;
+
+    public interface OnFriendInteractionListener {
+        void onStartNoteClick(User friend);
+        void onUnfriendClick(User friend);
+    }
+
+    public FriendsAdapter(List<User> friendsList, OnFriendInteractionListener listener) {
+        this.friendsList = friendsList != null ? friendsList : new ArrayList<>();
+        this.listener = listener;
+    }
+
+    @NonNull
+    @Override
+    public FriendViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
+        View view = LayoutInflater.from(parent.getContext())
+                .inflate(R.layout.item_friend, parent, false);
+        return new FriendViewHolder(view);
+    }
+
+    @Override
+    public void onBindViewHolder(@NonNull FriendViewHolder holder, int position) {
+        User friend = friendsList.get(position);
+        // Log using the class-level TAG
+        Log.d(TAG, "onBindViewHolder for position: " + position + ", Friend: " + (friend.displayName != null ? friend.displayName : friend.email));
+        holder.bind(friend, listener);
+    }
+
+    @Override
+    public int getItemCount() {
+        return friendsList != null ? friendsList.size() : 0;
+    }
+
+    public void updateData(List<User> newFriendsList) {
+        this.friendsList.clear();
+        if (newFriendsList != null) {
+            this.friendsList.addAll(newFriendsList);
+        }
+        // Log using the class-level TAG
+        Log.d(TAG, "updateData called. Item count: " + getItemCount());
+        notifyDataSetChanged();
+    }
+
+    static class FriendViewHolder extends RecyclerView.ViewHolder {
+        TextView textViewFriendName;
+        Button buttonStartNote;
+        Button buttonUnfriend;
+
+        FriendViewHolder(View itemView) {
+            super(itemView);
+            textViewFriendName = itemView.findViewById(R.id.textViewFriendName);
+            buttonStartNote = itemView.findViewById(R.id.buttonStartNote);
+            buttonUnfriend = itemView.findViewById(R.id.buttonUnfriend);
+        }
+
+        // Single, correctly structured bind method
+        void bind(final User friend, final OnFriendInteractionListener listener) {
+            String nameToDisplay = friend.displayName != null && !friend.displayName.isEmpty() ? friend.displayName : friend.email;
+            // Log using the outer class's TAG (or define one here if preferred, but outer is fine)
+            Log.d(FriendsAdapter.TAG, "ViewHolder bind: Setting text to '" + nameToDisplay + "' for friend UID: " + (friend.uid != null ? friend.uid : "null_uid"));
+            textViewFriendName.setText(nameToDisplay);
+
+            buttonStartNote.setOnClickListener(v -> {
+                if (listener != null) {
+                    listener.onStartNoteClick(friend);
+                }
+            });
+
+            buttonUnfriend.setOnClickListener(v -> {
+                if (listener != null) {
+                    listener.onUnfriendClick(friend);
+                }
+            });
+            // The duplicated/nested bind method was removed from here
+        }
+    }
+}
